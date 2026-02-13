@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
 # ================== 고정 설정(필요 시 너만 수정) ==================
 WIDTH, HEIGHT = 1280, 720
 PREVIEW_MAX_W = 960
-LOG_INTERVAL_SEC = 1.0
+LOG_INTERVAL_SEC = 300.0
 
 SAVE_IMAGE = True
 IMAGE_EXT = "jpg"
@@ -25,11 +25,11 @@ JPG_QUALITY = 90
 DATA_ROOT = Path("data")
 
 POINTS = [
-    ("p1", 300, 150),
-    ("p2", 980, 150),
-    ("p3", 300, 560),
-    ("p4", 980, 560),
-    ("pc", 640, 360),
+    ("p1", 500, 213),
+    ("p2", 740, 213),
+    ("p3", 500, 427),
+    ("p4", 740, 427),
+    ("pc", 620, 320),
 ]
 # ================================================================
 
@@ -332,5 +332,5 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     w = RGBApplianceGUI()
     w.resize(1100, 900)
-    w.show()
+    w.showFullScreen()
     sys.exit(app.exec_())
