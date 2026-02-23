@@ -339,7 +339,7 @@ class RGBApplianceGUI(QWidget):
         # ===== Camera =====
         self.picam2 = Picamera2()
         config = self.picam2.create_video_configuration(
-            main={"size": (WIDTH, HEIGHT), "format": "RGB888"}
+            main={"size": (WIDTH, HEIGHT), "format": "BGR888"}
         )
         self.picam2.configure(config)
         self.picam2.start()
@@ -506,8 +506,8 @@ class RGBApplianceGUI(QWidget):
             self.csv_writer = None
 
     def tick(self):
-        frame_rgb = self.picam2.capture_array()
-        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        frame_bgr = self.picam2.capture_array()
+        #frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
         # 상태 패널: 디스크/경과시간 갱신
         self._update_disk_label()
