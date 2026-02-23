@@ -1,6 +1,7 @@
 import sys
 import csv
 import time
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -8,15 +9,18 @@ import cv2
 from picamera2 import Picamera2
 
 from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QImage, QPixmap, QFont
+from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QHeaderView, QFrame
+    QTableWidget, QTableWidgetItem, QHeaderView, QFrame, QSizePolicy
 )
 
 # ================== 고정 설정(필요 시 너만 수정) ==================
 WIDTH, HEIGHT = 1280, 720
-PREVIEW_MAX_W = 960
+
+# ✅ 프리뷰 더 작게
+PREVIEW_MAX_W = 640
+
 LOG_INTERVAL_SEC = 300.0
 
 SAVE_IMAGE = True
@@ -31,6 +35,9 @@ POINTS = [
     ("p4", 740, 427),
     ("pc", 620, 320),
 ]
+
+# ✅ 디스크 용량 업데이트 주기(너무 자주 하면 쓸데없이 부담)
+DISK_UPDATE_SEC = 2.0
 # ================================================================
 
 def session_stamp():
@@ -65,6 +72,19 @@ def safe_rgb(frame_bgr, x, y):
     b, g, r = frame_bgr[y, x]
     return int(r), int(g), int(b)
 
+def fmt_hms(seconds: int) -> str:
+    if seconds < 0:
+        seconds = 0
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+def fmt_bytes(n: int) -> str:
+    # 보기 좋은 단위로 (GiB 기준)
+    gib = n / (1024**3)
+    return f"{gib:.2f} GB"
+
 class RGBApplianceGUI(QWidget):
     def __init__(self):
         super().__init__()
@@ -83,11 +103,42 @@ class RGBApplianceGUI(QWidget):
         top_row.addWidget(self.title_label, stretch=1)
         top_row.addWidget(self.status_pill)
 
-        # ===== 프리뷰 =====
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setObjectName("Separator")
+
+        # ===== 왼쪽: 프리뷰 =====
         self.preview_label = QLabel()
         self.preview_label.setObjectName("Preview")
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setText("Camera preview…")
+        self.preview_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.preview_label.setFixedWidth(PREVIEW_MAX_W + 40)  # 프리뷰가 왼쪽에서 과하게 커지지 않게 고정
+
+        # ===== 오른쪽: 상태 패널 =====
+        self.info_panel = QFrame()
+        self.info_panel.setObjectName("InfoPanel")
+        info_layout = QVBoxLayout()
+        info_layout.setContentsMargins(14, 14, 14, 14)
+        info_layout.setSpacing(10)
+
+        self.info_title = QLabel("현재 상태")
+        self.info_title.setObjectName("InfoTitle")
+
+        self.lab_state = QLabel("실험 상태: 대기")
+        self.lab_start = QLabel("실험 시작 시간: -")
+        self.lab_elapsed = QLabel("실험 경과 시간: 00:00:00")
+        self.lab_disk = QLabel("남은 용량: -")
+
+        for w in [self.lab_state, self.lab_start, self.lab_elapsed, self.lab_disk]:
+            w.setObjectName("InfoLine")
+
+        info_layout.addWidget(self.info_title)
+        info_layout.addWidget(self.lab_state)
+        info_layout.addWidget(self.lab_start)
+        info_layout.addWidget(self.lab_elapsed)
+        info_layout.addWidget(self.lab_disk)
+        self.info_panel.setLayout(info_layout)
 
         # ===== RGB 테이블 =====
         self.table = QTableWidget(len(POINTS), 6)
@@ -99,7 +150,6 @@ class RGBApplianceGUI(QWidget):
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-        # 테이블 초기값 채우기
         for row, (pid, x, y) in enumerate(POINTS):
             self._set_table_item(row, 0, pid, align=Qt.AlignCenter)
             self._set_table_item(row, 1, str(x), align=Qt.AlignCenter)
@@ -119,18 +169,24 @@ class RGBApplianceGUI(QWidget):
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_stop)
 
-        # ===== 레이아웃 =====
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setObjectName("Separator")
+        # ===== 메인 바디 레이아웃 (왼쪽 프리뷰 / 오른쪽 상태+테이블+버튼) =====
+        right_col = QVBoxLayout()
+        right_col.setSpacing(12)
+        right_col.addWidget(self.info_panel)
+        right_col.addWidget(QLabel("Live RGB (5 Points)"), alignment=Qt.AlignLeft)
+        right_col.addWidget(self.table, stretch=1)
+        right_col.addLayout(btn_row)
 
+        body_row = QHBoxLayout()
+        body_row.setSpacing(14)
+        body_row.addWidget(self.preview_label, stretch=0)
+        body_row.addLayout(right_col, stretch=1)
+
+        # ===== 전체 레이아웃 =====
         layout = QVBoxLayout()
         layout.addLayout(top_row)
         layout.addWidget(separator)
-        layout.addWidget(self.preview_label, stretch=1)
-        layout.addWidget(QLabel("Live RGB (5 Points)"), alignment=Qt.AlignLeft)
-        layout.addWidget(self.table)
-        layout.addLayout(btn_row)
+        layout.addLayout(body_row, stretch=1)
         self.setLayout(layout)
 
         self.btn_start.clicked.connect(self.start_experiment)
@@ -153,18 +209,22 @@ class RGBApplianceGUI(QWidget):
         self.csv_writer = None
         self.next_log_time = time.time()
 
+        self.experiment_start_dt = None  # ✅ 시작 시간 표시용
+
+        # 디스크 정보 갱신 타이머
+        self._last_disk_check = 0.0
+        self._update_disk_label(force=True)
+
         # ===== Timer =====
         self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
-        self.timer.start(30)  # 프리뷰 부드럽게
+        self.timer.start(30)  # 지금 “아주 잘 됨”이라고 했으니 일단 유지
 
     def _qss(self):
-        # "멋있게" 보이도록: 카드 느낌, pill 상태, 버튼 컬러
         return """
         QWidget { background: #0f172a; color: #e2e8f0; }
-        #TitleLabel {
-            font-size: 22px; font-weight: 700; padding: 6px 2px;
-        }
+        #TitleLabel { font-size: 22px; font-weight: 700; padding: 6px 2px; }
+
         #StatusPill {
             background: #1f2937;
             border: 1px solid #334155;
@@ -179,11 +239,23 @@ class RGBApplianceGUI(QWidget):
             border-radius: 12px;
             padding: 6px;
         }
-        #Separator {
-            color: #334155;
-            border: 1px solid #334155;
-        }
+        #Separator { color: #334155; border: 1px solid #334155; }
         QLabel { font-size: 14px; }
+
+        #InfoPanel{
+            background: #0b1220;
+            border: 1px solid #334155;
+            border-radius: 12px;
+        }
+        #InfoTitle{
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        #InfoLine{
+            font-size: 14px;
+            color: #cbd5e1;
+        }
 
         #RGBTable {
             background: #0b1220;
@@ -199,9 +271,7 @@ class RGBApplianceGUI(QWidget):
             padding: 8px;
             font-weight: 600;
         }
-        QTableWidget::item {
-            padding: 10px;
-        }
+        QTableWidget::item { padding: 10px; }
 
         QPushButton {
             border: none;
@@ -210,19 +280,10 @@ class RGBApplianceGUI(QWidget):
             font-size: 18px;
             font-weight: 700;
         }
-        QPushButton:disabled {
-            background: #334155;
-            color: #94a3b8;
-        }
-        #StartBtn {
-            background: #ef4444;
-            color: white;
-        }
+        QPushButton:disabled { background: #334155; color: #94a3b8; }
+        #StartBtn { background: #ef4444; color: white; }
         #StartBtn:hover { background: #dc2626; }
-        #StopBtn {
-            background: #3b82f6;
-            color: white;
-        }
+        #StopBtn { background: #3b82f6; color: white; }
         #StopBtn:hover { background: #2563eb; }
         """
 
@@ -230,6 +291,20 @@ class RGBApplianceGUI(QWidget):
         item = QTableWidgetItem(text)
         item.setTextAlignment(align)
         self.table.setItem(row, col, item)
+
+    def _update_disk_label(self, force=False):
+        now_t = time.time()
+        if (not force) and (now_t - self._last_disk_check < DISK_UPDATE_SEC):
+            return
+        self._last_disk_check = now_t
+
+        # DATA_ROOT가 있는 파티션의 남은 용량 기준
+        try:
+            DATA_ROOT.mkdir(parents=True, exist_ok=True)
+            usage = shutil.disk_usage(str(DATA_ROOT.resolve()))
+            self.lab_disk.setText(f"남은 용량: {fmt_bytes(usage.free)} (총 {fmt_bytes(usage.total)})")
+        except Exception:
+            self.lab_disk.setText("남은 용량: 확인 실패")
 
     def start_experiment(self):
         if self.running:
@@ -248,6 +323,12 @@ class RGBApplianceGUI(QWidget):
         self.running = True
         self.next_log_time = time.time()
 
+        # ✅ 상태 패널 값 갱신
+        self.experiment_start_dt = datetime.now()
+        self.lab_state.setText("실험 상태: 실험중")
+        self.lab_start.setText(f"실험 시작 시간: {self.experiment_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        self.lab_elapsed.setText("실험 경과 시간: 00:00:00")
+
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.status_pill.setText(f"RECORDING  •  {sess}")
@@ -261,16 +342,32 @@ class RGBApplianceGUI(QWidget):
         self.btn_stop.setEnabled(False)
         self.status_pill.setText("READY  •  Camera ON")
 
+        # ✅ 상태 패널 갱신
+        self.lab_state.setText("실험 상태: 대기")
+        # 시작시간은 마지막 기록으로 남겨두고 싶으면 유지해도 됨
+        # self.lab_start.setText("실험 시작 시간: -")
+        # self.lab_elapsed.setText("실험 경과 시간: 00:00:00")
+
         if self.csv_file:
             self.csv_file.close()
             self.csv_file = None
             self.csv_writer = None
 
+        self._update_disk_label(force=True)
+
     def tick(self):
         frame_rgb = self.picam2.capture_array()
         frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-        # 테이블 업데이트 (RGB + 좌표는 고정이지만 보기 좋게 계속 유지)
+        # ✅ 디스크 용량은 일정 주기만 갱신
+        self._update_disk_label()
+
+        # ✅ 경과 시간 표시(실험중일 때만)
+        if self.running and self.experiment_start_dt is not None:
+            elapsed = int((datetime.now() - self.experiment_start_dt).total_seconds())
+            self.lab_elapsed.setText(f"실험 경과 시간: {fmt_hms(elapsed)}")
+
+        # 테이블 업데이트
         for row, (pid, x, y) in enumerate(POINTS):
             rgb = safe_rgb(frame_bgr, x, y)
             if rgb is None:
@@ -283,7 +380,7 @@ class RGBApplianceGUI(QWidget):
                 self.table.item(row, 4).setText(str(g))
                 self.table.item(row, 5).setText(str(b))
 
-        # 프리뷰 표시
+        # 프리뷰 표시 (왼쪽, 더 작게)
         overlay = draw_points(frame_bgr, POINTS)
         disp = resize_for_preview(overlay, PREVIEW_MAX_W)
         disp_rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
@@ -331,6 +428,5 @@ class RGBApplianceGUI(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     w = RGBApplianceGUI()
-    w.resize(1100, 900)
     w.showFullScreen()
     sys.exit(app.exec_())
