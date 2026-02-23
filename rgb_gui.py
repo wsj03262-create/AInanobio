@@ -21,7 +21,9 @@ from PyQt5.QtWidgets import (
 WIDTH, HEIGHT = 1280, 720
 PREVIEW_MAX_W = 640
 
-LOG_INTERVAL_SEC = 300.0  # 저장 주기(초)
+# ✅ 저장 주기 분리
+RGB_LOG_INTERVAL_SEC = 60.0      # RGB(CSV) 1분마다
+IMAGE_LOG_INTERVAL_SEC = 300.0   # 이미지 5분마다
 
 SAVE_IMAGE = True
 IMAGE_EXT = "jpg"
@@ -36,7 +38,7 @@ POINTS = [
     ("pc", 626, 320),
 ]
 
-# ✅ 그래프는 기본으로 pc만 그리기 (너가 바꾸고 싶으면 여기만)
+# ✅ 그래프는 기본으로 pc만 그리기
 PLOT_POINT_ID = "pc"
 
 # ✅ 그래프에 유지할 최대 샘플 수
@@ -189,6 +191,7 @@ class RGBPlotWidget(QFrame):
 
         # x 스케일: 최근 구간을 0..N-1로 매핑
         n = len(self.x)
+
         def x_to_px(i):
             return left + int(plot_w * i / (n - 1))
 
@@ -351,7 +354,10 @@ class RGBApplianceGUI(QWidget):
         self.csv_path = None
         self.csv_file = None
         self.csv_writer = None
-        self.next_log_time = time.time()
+
+        # ✅ 저장 타이머 2개
+        self.next_rgb_log_time = time.time()
+        self.next_img_log_time = time.time()
 
         self.experiment_start_dt = None
         self.sample_count = 0
@@ -363,7 +369,7 @@ class RGBApplianceGUI(QWidget):
         # ===== Timer =====
         self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
-        self.timer.start(40)  # 프리뷰/테이블은 부드럽게, 부담 줄이려면 60~100도 OK
+        self.timer.start(40)
 
     def _qss(self):
         return """
@@ -472,7 +478,10 @@ class RGBApplianceGUI(QWidget):
         self.csv_writer.writerow(["timestamp_iso", "unix_ms", "image_path", "point_id", "x", "y", "R", "G", "B"])
 
         self.running = True
-        self.next_log_time = time.time()
+
+        now_t = time.time()
+        self.next_rgb_log_time = now_t
+        self.next_img_log_time = now_t
 
         self.experiment_start_dt = datetime.now()
         self.sample_count = 0
@@ -485,7 +494,6 @@ class RGBApplianceGUI(QWidget):
         self.btn_stop.setEnabled(True)
         self.status_pill.setText(f"RECORDING  •  {sess}")
 
-        # ✅ 그래프는 실험 시작 시 초기화
         self.plot.reset()
 
     def stop_experiment(self):
@@ -537,43 +545,49 @@ class RGBApplianceGUI(QWidget):
         qimg = QImage(disp_rgb.data, w, h, w * 3, QImage.Format_RGB888)
         self.preview_label.setPixmap(QPixmap.fromImage(qimg))
 
-        # 저장(실험중 + 저장 타이밍)
-        if self.running and time.time() >= self.next_log_time and self.csv_writer is not None:
-            t_iso = now_iso()
-            t_ms = now_ms()
+        # ================= 저장 로직 분리 =================
+        if self.running and self.csv_writer is not None:
+            now_t = time.time()
 
+            # (1) 이미지 저장: 5분마다
             img_path_str = ""
-            if SAVE_IMAGE:
+            if SAVE_IMAGE and now_t >= self.next_img_log_time:
                 self.images_dir.mkdir(parents=True, exist_ok=True)
-                img_path = self.images_dir / f"{t_ms}.{IMAGE_EXT}"
+                t_ms_img = now_ms()
+                img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
                 if IMAGE_EXT.lower() in ["jpg", "jpeg"]:
                     cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
                 else:
                     cv2.imwrite(str(img_path), frame_bgr)
                 img_path_str = str(img_path)
 
-            # CSV 기록 + 그래프용 값 찾기
-            plot_rgb = None
+                self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
 
-            for pid, x, y in POINTS:
-                rgb = safe_rgb(frame_bgr, x, y)
-                if pid == PLOT_POINT_ID:
-                    plot_rgb = rgb
+            # (2) RGB 저장: 1분마다 (그래프 갱신도 여기서)
+            if now_t >= self.next_rgb_log_time:
+                t_iso = now_iso()
+                t_ms = now_ms()
 
-                if rgb is None:
-                    self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, "", "", ""])
-                else:
-                    r, g, b = rgb
-                    self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, r, g, b])
+                plot_rgb = None
+                for pid, x, y in POINTS:
+                    rgb = safe_rgb(frame_bgr, x, y)
+                    if pid == PLOT_POINT_ID:
+                        plot_rgb = rgb
 
-            self.csv_file.flush()
+                    if rgb is None:
+                        self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, "", "", ""])
+                    else:
+                        r, g, b = rgb
+                        self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, r, g, b])
 
-            # ✅ 저장될 때마다 그래프 갱신 (기본 pc)
-            if plot_rgb is not None:
-                self.sample_count += 1
-                self.plot.append(self.sample_count, plot_rgb)
+                self.csv_file.flush()
 
-            self.next_log_time = time.time() + LOG_INTERVAL_SEC
+                if plot_rgb is not None:
+                    self.sample_count += 1
+                    self.plot.append(self.sample_count, plot_rgb)
+
+                self.next_rgb_log_time = now_t + RGB_LOG_INTERVAL_SEC
+        # ===================================================
 
     def closeEvent(self, event):
         try:
