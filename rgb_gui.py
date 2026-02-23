@@ -26,14 +26,14 @@ LOG_INTERVAL_SEC = 300.0  # 저장 주기(초)
 SAVE_IMAGE = True
 IMAGE_EXT = "jpg"
 JPG_QUALITY = 90
-DATA_ROOT = Path("data")
+DATA_ROOT = Path("/home/pi/Ainanobio_data")
 
 POINTS = [
-    ("p1", 500, 213),
-    ("p2", 740, 213),
-    ("p3", 500, 427),
-    ("p4", 740, 427),
-    ("pc", 620, 320),
+    ("p1", 506, 253),
+    ("p2", 746, 253),
+    ("p3", 506, 387),
+    ("p4", 746, 387),
+    ("pc", 626, 320),
 ]
 
 # ✅ 그래프는 기본으로 pc만 그리기 (너가 바꾸고 싶으면 여기만)
