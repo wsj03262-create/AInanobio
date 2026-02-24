@@ -2,6 +2,8 @@ import sys
 import csv
 import time
 import shutil
+import os
+import re
 from datetime import datetime
 from pathlib import Path
 from collections import deque
@@ -9,12 +11,13 @@ from collections import deque
 import cv2
 from picamera2 import Picamera2
 
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout,
-    QTableWidget, QTableWidgetItem, QHeaderView, QFrame
+    QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
+    QComboBox
 )
 
 # ================== 고정 설정(필요 시 너만 수정) ==================
@@ -101,6 +104,94 @@ def fmt_bytes(n: int) -> str:
     return f"{gib:.2f} GB"
 
 
+# ===================== USB helpers =====================
+
+def find_usb_mounts():
+    """
+    USB 자동 마운트 지점 탐색(대개 /media/* 또는 /run/media/*).
+    """
+    mounts = []
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                mnt = parts[1]
+
+                if not (mnt.startswith("/media/") or mnt.startswith("/run/media/")):
+                    continue
+
+                if mnt in ("/media", "/media/pi", "/run/media", "/run/media/pi"):
+                    continue
+
+                if os.path.isdir(mnt):
+                    mounts.append(mnt)
+    except Exception:
+        pass
+
+    mounts = sorted(list(dict.fromkeys(mounts)))
+    return mounts
+
+
+def list_session_dates(data_root: Path):
+    """
+    DATA_ROOT 아래 세션 폴더(YYYY-MM-DD_HH-MM-SS)를 스캔해서 날짜 목록만 뽑음.
+    """
+    dates = set()
+    if not data_root.exists():
+        return []
+    for p in data_root.iterdir():
+        if not p.is_dir():
+            continue
+        name = p.name
+        if re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$", name):
+            dates.add(name[:10])
+    return sorted(dates, reverse=True)
+
+
+def sessions_for_date(data_root: Path, yyyy_mm_dd: str):
+    """
+    특정 날짜의 세션 폴더들 반환.
+    """
+    out = []
+    if not data_root.exists():
+        return out
+    prefix = f"{yyyy_mm_dd}_"
+    for p in data_root.iterdir():
+        if p.is_dir() and p.name.startswith(prefix):
+            out.append(p)
+    return sorted(out)
+
+
+class CopyWorker(QThread):
+    log = pyqtSignal(str)
+    done = pyqtSignal(bool, str)
+
+    def __init__(self, src_dirs, dst_root):
+        super().__init__()
+        self.src_dirs = [Path(p) for p in src_dirs]
+        self.dst_root = Path(dst_root)
+
+    def run(self):
+        try:
+            self.dst_root.mkdir(parents=True, exist_ok=True)
+
+            for src in self.src_dirs:
+                dst = self.dst_root / src.name
+                self.log.emit(f"복사 중: {src.name}")
+
+                # 이미 존재하면 덮어쓰기
+                if dst.exists():
+                    shutil.rmtree(dst)
+
+                shutil.copytree(src, dst)
+
+            self.done.emit(True, f"완료: {len(self.src_dirs)}개 세션 복사됨")
+        except Exception as e:
+            self.done.emit(False, f"실패: {e}")
+
+
 class RGBPlotWidget(QFrame):
     """
     가벼운 실시간 그래프 위젯(QPainter로 직접 그림).
@@ -144,13 +235,11 @@ class RGBPlotWidget(QFrame):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
 
-        # 배경
         p.fillRect(self.rect(), self._bg)
 
         w = self.width()
         h = self.height()
 
-        # 여백(axes)
         left = 46
         right = 14
         top = 36
@@ -159,7 +248,6 @@ class RGBPlotWidget(QFrame):
         plot_w = max(1, w - left - right)
         plot_h = max(1, h - top - bottom)
 
-        # 제목
         p.setPen(self._text)
         f = QFont()
         f.setPointSize(12)
@@ -167,13 +255,11 @@ class RGBPlotWidget(QFrame):
         p.setFont(f)
         p.drawText(12, 22, self.title)
 
-        # 그리드(가로 4줄)
         p.setPen(QPen(self._grid, 1))
         for i in range(5):
             y = top + int(plot_h * i / 4)
             p.drawLine(left, y, left + plot_w, y)
 
-        # y축 라벨(0, 64, 128, 192, 255)
         p.setPen(self._text)
         f2 = QFont()
         f2.setPointSize(9)
@@ -184,12 +270,10 @@ class RGBPlotWidget(QFrame):
             y = top + int(plot_h * i / 4)
             p.drawText(8, y + 4, f"{val:3d}")
 
-        # 데이터가 없으면 종료
         if len(self.x) < 2:
             p.end()
             return
 
-        # x 스케일: 최근 구간을 0..N-1로 매핑
         n = len(self.x)
 
         def x_to_px(i):
@@ -199,7 +283,6 @@ class RGBPlotWidget(QFrame):
             v = max(0, min(255, v))
             return top + int(plot_h * (1.0 - (v / 255.0)))
 
-        # 라인 그리기(채널별)
         def draw_line(vals, pen):
             p.setPen(pen)
             prev_x = x_to_px(0)
@@ -214,7 +297,6 @@ class RGBPlotWidget(QFrame):
         draw_line(list(self.g), self._pen_g)
         draw_line(list(self.b), self._pen_b)
 
-        # 범례(오른쪽 위)
         p.setFont(f2)
         legend_x = left + plot_w - 110
         legend_y = 18
@@ -255,12 +337,19 @@ class RGBApplianceGUI(QWidget):
         self.preview_label.setObjectName("Preview")
         self.preview_label.setAlignment(Qt.AlignCenter)
 
-        # ===== 우상단: 현재 상태 패널 =====
+        # ===== 우상단: 현재 상태 + USB 전송 패널(반반) =====
         self.info_panel = QFrame()
         self.info_panel.setObjectName("InfoPanel")
         info_layout = QVBoxLayout()
         info_layout.setContentsMargins(14, 14, 14, 14)
-        info_layout.setSpacing(8)
+        info_layout.setSpacing(10)
+
+        # --- (A) 상태 영역 ---
+        self.status_frame = QFrame()
+        self.status_frame.setObjectName("StatusFrame")
+        status_layout = QVBoxLayout()
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(8)
 
         self.info_title = QLabel("현재 상태")
         self.info_title.setObjectName("InfoTitle")
@@ -273,12 +362,60 @@ class RGBApplianceGUI(QWidget):
         for w in [self.lab_state, self.lab_start, self.lab_elapsed, self.lab_disk]:
             w.setObjectName("InfoLine")
 
-        info_layout.addWidget(self.info_title)
-        info_layout.addWidget(self.lab_state)
-        info_layout.addWidget(self.lab_start)
-        info_layout.addWidget(self.lab_elapsed)
-        info_layout.addWidget(self.lab_disk)
-        info_layout.addStretch(1)
+        status_layout.addWidget(self.info_title)
+        status_layout.addWidget(self.lab_state)
+        status_layout.addWidget(self.lab_start)
+        status_layout.addWidget(self.lab_elapsed)
+        status_layout.addWidget(self.lab_disk)
+        status_layout.addStretch(1)
+        self.status_frame.setLayout(status_layout)
+
+        # --- (B) USB 전송 영역 ---
+        self.usb_frame = QFrame()
+        self.usb_frame.setObjectName("UsbFrame")
+        usb_layout = QVBoxLayout()
+        usb_layout.setContentsMargins(0, 0, 0, 0)
+        usb_layout.setSpacing(8)
+
+        usb_sep = QFrame()
+        usb_sep.setFrameShape(QFrame.HLine)
+        usb_sep.setObjectName("Separator")
+
+        self.usb_title = QLabel("USB 데이터 전송")
+        self.usb_title.setObjectName("InfoTitle")
+
+        self.usb_status = QLabel("USB: 감지 중...")
+        self.usb_status.setObjectName("InfoLine")
+
+        self.date_combo = QComboBox()
+        self.date_combo.setObjectName("UsbCombo")
+
+        self.btn_refresh_usb = QPushButton("새로고침")
+        self.btn_refresh_usb.setObjectName("UsbBtn")
+
+        self.btn_copy_usb = QPushButton("USB로 복사")
+        self.btn_copy_usb.setObjectName("UsbBtnPrimary")
+        self.btn_copy_usb.setEnabled(False)
+
+        self.usb_progress = QLabel("대기 중")
+        self.usb_progress.setObjectName("InfoLine")
+
+        usb_row = QHBoxLayout()
+        usb_row.addWidget(self.date_combo, stretch=1)
+        usb_row.addWidget(self.btn_refresh_usb)
+        usb_row.addWidget(self.btn_copy_usb)
+
+        usb_layout.addWidget(usb_sep)
+        usb_layout.addWidget(self.usb_title)
+        usb_layout.addWidget(self.usb_status)
+        usb_layout.addLayout(usb_row)
+        usb_layout.addWidget(self.usb_progress)
+        usb_layout.addStretch(1)
+        self.usb_frame.setLayout(usb_layout)
+
+        # 반반 배치(Stretch)
+        info_layout.addWidget(self.status_frame, stretch=1)
+        info_layout.addWidget(self.usb_frame, stretch=1)
         self.info_panel.setLayout(info_layout)
 
         # ===== 좌중단: Live RGB 테이블 (Point + RGB만) =====
@@ -325,14 +462,12 @@ class RGBApplianceGUI(QWidget):
         grid.addWidget(self.btn_start,    2, 0)
         grid.addWidget(self.btn_stop,     2, 1)
 
-        # 각 행/열 비율(보기 좋게)
         grid.setColumnStretch(0, 3)
         grid.setColumnStretch(1, 2)
         grid.setRowStretch(0, 4)
         grid.setRowStretch(1, 3)
         grid.setRowStretch(2, 0)
 
-        # ===== 전체 레이아웃 =====
         layout = QVBoxLayout()
         layout.addLayout(top_row)
         layout.addWidget(separator)
@@ -342,7 +477,7 @@ class RGBApplianceGUI(QWidget):
         # ===== Camera =====
         self.picam2 = Picamera2()
         config = self.picam2.create_video_configuration(
-            main={"size": (WIDTH, HEIGHT), "format": "RGB888"}
+            main={"size": (WIDTH, HEIGHT), "format": "BGR888"}
         )
         self.picam2.configure(config)
         self.picam2.start()
@@ -355,18 +490,29 @@ class RGBApplianceGUI(QWidget):
         self.csv_file = None
         self.csv_writer = None
 
-        # ✅ 저장 타이머 2개
         self.next_rgb_log_time = time.time()
         self.next_img_log_time = time.time()
 
         self.experiment_start_dt = None
         self.sample_count = 0
 
-        # 디스크 표시
         self._last_disk_check = 0.0
         self._update_disk_label(force=True)
 
-        # ===== Timer =====
+        # ===== USB state =====
+        self.usb_mounts = []
+        self.usb_mount = None
+        self.copy_worker = None
+
+        self.btn_refresh_usb.clicked.connect(self.refresh_usb_ui)
+        self.btn_copy_usb.clicked.connect(self.copy_selected_date_to_usb)
+
+        self.usb_timer = QTimer()
+        self.usb_timer.timeout.connect(self.refresh_usb_ui)
+        self.usb_timer.start(1000)  # 1초마다 감지/갱신
+        self.refresh_usb_ui()
+
+        # ===== Main Timer =====
         self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
         self.timer.start(40)
@@ -402,7 +548,7 @@ class RGBApplianceGUI(QWidget):
         #InfoTitle{
             font-size: 16px;
             font-weight: 800;
-            margin-bottom: 6px;
+            margin-bottom: 2px;
         }
         #InfoLine{
             font-size: 14px;
@@ -443,6 +589,35 @@ class RGBApplianceGUI(QWidget):
         #StartBtn:hover { background: #dc2626; }
         #StopBtn { background: #3b82f6; color: white; }
         #StopBtn:hover { background: #2563eb; }
+
+        /* USB area */
+        #UsbCombo {
+            background: #111827;
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 8px;
+            color: #e2e8f0;
+            font-size: 14px;
+        }
+        #UsbBtn {
+            background: #334155;
+            color: #e2e8f0;
+            padding: 10px 12px;
+            font-size: 14px;
+            font-weight: 800;
+            border-radius: 10px;
+        }
+        #UsbBtn:hover { background: #475569; }
+
+        #UsbBtnPrimary {
+            background: #22c55e;
+            color: #0b1220;
+            padding: 10px 12px;
+            font-size: 14px;
+            font-weight: 900;
+            border-radius: 10px;
+        }
+        #UsbBtnPrimary:hover { background: #16a34a; }
         """
 
     def _set_table_item(self, row, col, text, align=Qt.AlignLeft):
@@ -462,6 +637,79 @@ class RGBApplianceGUI(QWidget):
             self.lab_disk.setText(f"남은 용량: {fmt_bytes(usage.free)} (총 {fmt_bytes(usage.total)})")
         except Exception:
             self.lab_disk.setText("남은 용량: 확인 실패")
+
+    # =================== USB UI/Logic ===================
+
+    def refresh_usb_ui(self):
+        mounts = find_usb_mounts()
+        self.usb_mounts = mounts
+        self.usb_mount = mounts[0] if mounts else None
+
+        if self.usb_mount:
+            self.usb_status.setText(f"USB: 연결됨  •  {self.usb_mount}")
+        else:
+            self.usb_status.setText("USB: 연결 안됨")
+
+        dates = list_session_dates(DATA_ROOT)
+        current = self.date_combo.currentText() if self.date_combo.count() else ""
+
+        self.date_combo.blockSignals(True)
+        self.date_combo.clear()
+        for d in dates:
+            self.date_combo.addItem(d)
+        if current and current in dates:
+            self.date_combo.setCurrentText(current)
+        self.date_combo.blockSignals(False)
+
+        can_copy = (self.usb_mount is not None) and (self.date_combo.count() > 0)
+        if self.copy_worker is not None and self.copy_worker.isRunning():
+            can_copy = False
+
+        self.btn_copy_usb.setEnabled(can_copy)
+
+        if self.date_combo.count() == 0:
+            self.usb_progress.setText("대기 중 (복사할 날짜 데이터 없음)")
+        elif not self.usb_mount:
+            self.usb_progress.setText("대기 중 (USB 연결 필요)")
+        else:
+            d = self.date_combo.currentText()
+            n = len(sessions_for_date(DATA_ROOT, d)) if d else 0
+            self.usb_progress.setText(f"대기 중 (선택 날짜: {d}, 세션 {n}개)")
+
+    def copy_selected_date_to_usb(self):
+        if not self.usb_mount:
+            self.usb_progress.setText("USB가 연결되지 않음")
+            return
+
+        date = self.date_combo.currentText().strip()
+        if not date:
+            self.usb_progress.setText("복사할 날짜를 선택해줘")
+            return
+
+        src_dirs = sessions_for_date(DATA_ROOT, date)
+        if not src_dirs:
+            self.usb_progress.setText(f"{date} 날짜에 복사할 세션 폴더가 없음")
+            return
+
+        dst_root = Path(self.usb_mount) / "Ainanobio_export" / date
+
+        self.btn_copy_usb.setEnabled(False)
+        self.usb_progress.setText("복사 준비 중...")
+
+        self.copy_worker = CopyWorker(src_dirs, dst_root)
+        self.copy_worker.log.connect(self._on_copy_log)
+        self.copy_worker.done.connect(self._on_copy_done)
+        self.copy_worker.start()
+
+    def _on_copy_log(self, msg: str):
+        self.usb_progress.setText(msg)
+
+    def _on_copy_done(self, ok: bool, msg: str):
+        self.usb_progress.setText(msg)
+        self.copy_worker = None
+        self.refresh_usb_ui()
+
+    # =================== Experiment ===================
 
     def start_experiment(self):
         if self.running:
@@ -495,6 +743,7 @@ class RGBApplianceGUI(QWidget):
         self.status_pill.setText(f"RECORDING  •  {sess}")
 
         self.plot.reset()
+        self.refresh_usb_ui()
 
     def stop_experiment(self):
         if not self.running:
@@ -513,11 +762,13 @@ class RGBApplianceGUI(QWidget):
             self.csv_file = None
             self.csv_writer = None
 
+        self.refresh_usb_ui()
+
     def tick(self):
+        # ⚠️ 네 환경에서 이 조합이 색이 맞는 상태(유지)
         frame_rgb = self.picam2.capture_array()
         frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-        # 상태 패널: 디스크/경과시간 갱신
         self._update_disk_label()
 
         if self.running and self.experiment_start_dt is not None:
@@ -594,6 +845,12 @@ class RGBApplianceGUI(QWidget):
             self.running = False
             if self.csv_file:
                 self.csv_file.close()
+
+            if self.copy_worker is not None and self.copy_worker.isRunning():
+                # 복사중이면 짧게 정리(강제종료는 데이터 손상 위험)
+                self.usb_progress.setText("종료 중... (USB 복사 작업 정리)")
+                self.copy_worker.wait(1500)
+
             self.picam2.stop()
         except Exception:
             pass
