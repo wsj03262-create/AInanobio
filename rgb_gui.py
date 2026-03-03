@@ -351,22 +351,40 @@ class RGBApplianceGUI(QWidget):
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(8)
 
+        # 제목 + 상태 배지(원 + 텍스트)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+
         self.info_title = QLabel("현재 상태")
         self.info_title.setObjectName("InfoTitle")
+
+        self.state_badge = QLabel("")
+        self.state_badge.setObjectName("StateBadge")
+        self.state_badge.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        title_row.addWidget(self.info_title, stretch=1)
+        title_row.addWidget(self.state_badge, stretch=0)
+        status_layout.addLayout(title_row)
 
         self.lab_state = QLabel("실험 상태: 대기")
         self.lab_start = QLabel("실험 시작 시간: -")
         self.lab_elapsed = QLabel("실험 경과 시간: 00:00:00")
         self.lab_disk = QLabel("남은 용량: -")
 
-        for w in [self.lab_state, self.lab_start, self.lab_elapsed, self.lab_disk]:
+        # ✅ 추가: 수집 카운트 2개
+        self.lab_img_count = QLabel("이미지 수집: 0")
+        self.lab_data_count = QLabel("데이터 수집: 0")
+
+        for w in [self.lab_state, self.lab_start, self.lab_elapsed, self.lab_disk,
+                  self.lab_img_count, self.lab_data_count]:
             w.setObjectName("InfoLine")
 
-        status_layout.addWidget(self.info_title)
         status_layout.addWidget(self.lab_state)
         status_layout.addWidget(self.lab_start)
         status_layout.addWidget(self.lab_elapsed)
         status_layout.addWidget(self.lab_disk)
+        status_layout.addWidget(self.lab_img_count)
+        status_layout.addWidget(self.lab_data_count)
         status_layout.addStretch(1)
         self.status_frame.setLayout(status_layout)
 
@@ -496,6 +514,10 @@ class RGBApplianceGUI(QWidget):
         self.experiment_start_dt = None
         self.sample_count = 0
 
+        # ✅ 카운터(실험 중에만 증가)
+        self.image_count = 0      # 저장된 이미지 개수
+        self.data_log_count = 0   # 1분마다 RGB 로그 횟수(= 저장 사이클 횟수)
+
         self._last_disk_check = 0.0
         self._update_disk_label(force=True)
 
@@ -511,6 +533,10 @@ class RGBApplianceGUI(QWidget):
         self.usb_timer.timeout.connect(self.refresh_usb_ui)
         self.usb_timer.start(1000)  # 1초마다 감지/갱신
         self.refresh_usb_ui()
+
+        # 초기 UI(배지/카운트)
+        self._set_state_badge(False)
+        self._update_counts_ui()
 
         # ===== Main Timer =====
         self.timer = QTimer()
@@ -553,6 +579,11 @@ class RGBApplianceGUI(QWidget):
         #InfoLine{
             font-size: 14px;
             color: #cbd5e1;
+        }
+        #StateBadge{
+            font-size: 14px;
+            font-weight: 900;
+            color: #e2e8f0;
         }
 
         #RGBTable {
@@ -624,6 +655,16 @@ class RGBApplianceGUI(QWidget):
         item = QTableWidgetItem(text)
         item.setTextAlignment(align)
         self.table.setItem(row, col, item)
+
+    def _set_state_badge(self, running: bool):
+        if running:
+            self.state_badge.setText('<span style="color:#ef4444;">●</span> 실험 중')
+        else:
+            self.state_badge.setText('<span style="color:#3b82f6;">●</span> 실험 대기')
+
+    def _update_counts_ui(self):
+        self.lab_img_count.setText(f"이미지 수집: {self.image_count}")
+        self.lab_data_count.setText(f"데이터 수집: {self.data_log_count}")
 
     def _update_disk_label(self, force=False):
         now_t = time.time()
@@ -734,6 +775,11 @@ class RGBApplianceGUI(QWidget):
         self.experiment_start_dt = datetime.now()
         self.sample_count = 0
 
+        # ✅ 카운터 초기화
+        self.image_count = 0
+        self.data_log_count = 0
+        self._update_counts_ui()
+
         self.lab_state.setText("실험 상태: 실험중")
         self.lab_start.setText(f"실험 시작 시간: {self.experiment_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
         self.lab_elapsed.setText("실험 경과 시간: 00:00:00")
@@ -741,6 +787,8 @@ class RGBApplianceGUI(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.status_pill.setText(f"RECORDING  •  {sess}")
+
+        self._set_state_badge(True)
 
         self.plot.reset()
         self.refresh_usb_ui()
@@ -755,6 +803,7 @@ class RGBApplianceGUI(QWidget):
         self.status_pill.setText("READY  •  Camera ON")
 
         self.lab_state.setText("실험 상태: 대기")
+        self._set_state_badge(False)
         self._update_disk_label(force=True)
 
         if self.csv_file:
@@ -807,10 +856,16 @@ class RGBApplianceGUI(QWidget):
                 t_ms_img = now_ms()
                 img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
                 if IMAGE_EXT.lower() in ["jpg", "jpeg"]:
-                    cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
+                    ok = cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
                 else:
-                    cv2.imwrite(str(img_path), frame_bgr)
-                img_path_str = str(img_path)
+                    ok = cv2.imwrite(str(img_path), frame_bgr)
+
+                if ok:
+                    img_path_str = str(img_path)
+                    self.image_count += 1
+                    self._update_counts_ui()
+                else:
+                    img_path_str = ""
 
                 self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
 
@@ -818,6 +873,10 @@ class RGBApplianceGUI(QWidget):
             if now_t >= self.next_rgb_log_time:
                 t_iso = now_iso()
                 t_ms = now_ms()
+
+                # ✅ 데이터 수집 카운트: "1분마다 1회 로그 사이클" 기준
+                self.data_log_count += 1
+                self._update_counts_ui()
 
                 plot_rgb = None
                 for pid, x, y in POINTS:
@@ -847,7 +906,6 @@ class RGBApplianceGUI(QWidget):
                 self.csv_file.close()
 
             if self.copy_worker is not None and self.copy_worker.isRunning():
-                # 복사중이면 짧게 정리(강제종료는 데이터 손상 위험)
                 self.usb_progress.setText("종료 중... (USB 복사 작업 정리)")
                 self.copy_worker.wait(1500)
 
