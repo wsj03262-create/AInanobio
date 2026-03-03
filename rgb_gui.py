@@ -30,7 +30,7 @@ IMAGE_LOG_INTERVAL_SEC = 300.0   # 이미지 5분마다
 
 SAVE_IMAGE = True
 IMAGE_EXT = "jpg"
-JPG_QUALITY = 90
+JPG_QUALITY = 95
 DATA_ROOT = Path("/home/pi/Ainanobio_data")
 
 POINTS = [
