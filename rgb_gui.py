@@ -20,13 +20,12 @@ from PyQt5.QtWidgets import (
     QComboBox
 )
 
-# ================== 고정 설정(필요 시 너만 수정) ==================
+# ================== 고정 설정 ==================
 WIDTH, HEIGHT = 1280, 720
-PREVIEW_MAX_W = 640
+PREVIEW_MAX_W = 480   # 기존 640 -> 480로 축소하여 부하 감소
 
-# ✅ 저장 주기 분리
-RGB_LOG_INTERVAL_SEC = 60.0      # RGB(CSV) 1분마다
-IMAGE_LOG_INTERVAL_SEC = 300.0   # 이미지 5분마다
+RGB_LOG_INTERVAL_SEC = 60.0
+IMAGE_LOG_INTERVAL_SEC = 300.0
 
 SAVE_IMAGE = True
 IMAGE_EXT = "jpg"
@@ -41,15 +40,15 @@ POINTS = [
     ("pc", 626, 320),
 ]
 
-# ✅ 그래프는 기본으로 pc만 그리기
 PLOT_POINT_ID = "pc"
-
-# ✅ 그래프에 유지할 최대 샘플 수
 PLOT_MAX_POINTS = 240
-
-# ✅ 디스크 용량 표시 갱신 주기
 DISK_UPDATE_SEC = 2.0
-# ================================================================
+
+# === 성능 최적화용 타이머 주기 ===
+PREVIEW_INTERVAL_MS = 100    # 10fps
+INFO_INTERVAL_MS = 500       # 상태/테이블/경과시간 갱신
+USB_INTERVAL_MS = 5000       # USB 탐색
+# ===============================================
 
 
 def session_stamp():
@@ -107,9 +106,6 @@ def fmt_bytes(n: int) -> str:
 # ===================== USB helpers =====================
 
 def find_usb_mounts():
-    """
-    USB 자동 마운트 지점 탐색(대개 /media/* 또는 /run/media/*).
-    """
     mounts = []
     try:
         with open("/proc/mounts", "r", encoding="utf-8") as f:
@@ -135,9 +131,6 @@ def find_usb_mounts():
 
 
 def list_session_dates(data_root: Path):
-    """
-    DATA_ROOT 아래 세션 폴더(YYYY-MM-DD_HH-MM-SS)를 스캔해서 날짜 목록만 뽑음.
-    """
     dates = set()
     if not data_root.exists():
         return []
@@ -151,9 +144,6 @@ def list_session_dates(data_root: Path):
 
 
 def sessions_for_date(data_root: Path, yyyy_mm_dd: str):
-    """
-    특정 날짜의 세션 폴더들 반환.
-    """
     out = []
     if not data_root.exists():
         return out
@@ -181,7 +171,6 @@ class CopyWorker(QThread):
                 dst = self.dst_root / src.name
                 self.log.emit(f"복사 중: {src.name}")
 
-                # 이미 존재하면 덮어쓰기
                 if dst.exists():
                     shutil.rmtree(dst)
 
@@ -193,11 +182,6 @@ class CopyWorker(QThread):
 
 
 class RGBPlotWidget(QFrame):
-    """
-    가벼운 실시간 그래프 위젯(QPainter로 직접 그림).
-    - y축: 0~255
-    - x축: 샘플 인덱스(최근 PLOT_MAX_POINTS)
-    """
     def __init__(self, title="RGB Plot", parent=None):
         super().__init__(parent)
         self.setObjectName("PlotPanel")
@@ -212,9 +196,9 @@ class RGBPlotWidget(QFrame):
         self._grid = QColor("#334155")
         self._text = QColor("#cbd5e1")
 
-        self._pen_r = QPen(QColor(239, 68, 68), 2)   # Red-ish
-        self._pen_g = QPen(QColor(34, 197, 94), 2)   # Green-ish
-        self._pen_b = QPen(QColor(59, 130, 246), 2)  # Blue-ish
+        self._pen_r = QPen(QColor(239, 68, 68), 2)
+        self._pen_g = QPen(QColor(34, 197, 94), 2)
+        self._pen_b = QPen(QColor(59, 130, 246), 2)
 
     def reset(self):
         self.x.clear()
@@ -337,21 +321,19 @@ class RGBApplianceGUI(QWidget):
         self.preview_label.setObjectName("Preview")
         self.preview_label.setAlignment(Qt.AlignCenter)
 
-        # ===== 우상단: 현재 상태 + USB 전송 패널(반반) =====
+        # ===== 우상단: 현재 상태 + USB 전송 패널 =====
         self.info_panel = QFrame()
         self.info_panel.setObjectName("InfoPanel")
         info_layout = QVBoxLayout()
         info_layout.setContentsMargins(14, 14, 14, 14)
         info_layout.setSpacing(10)
 
-        # --- (A) 상태 영역 ---
         self.status_frame = QFrame()
         self.status_frame.setObjectName("StatusFrame")
         status_layout = QVBoxLayout()
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(8)
 
-        # 제목 + 상태 배지(원 + 텍스트)
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
 
@@ -370,8 +352,6 @@ class RGBApplianceGUI(QWidget):
         self.lab_start = QLabel("실험 시작 시간: -")
         self.lab_elapsed = QLabel("실험 경과 시간: 00:00:00")
         self.lab_disk = QLabel("남은 용량: -")
-
-        # ✅ 추가: 수집 카운트 2개
         self.lab_img_count = QLabel("이미지 수집: 0")
         self.lab_data_count = QLabel("데이터 수집: 0")
 
@@ -388,7 +368,6 @@ class RGBApplianceGUI(QWidget):
         status_layout.addStretch(1)
         self.status_frame.setLayout(status_layout)
 
-        # --- (B) USB 전송 영역 ---
         self.usb_frame = QFrame()
         self.usb_frame.setObjectName("UsbFrame")
         usb_layout = QVBoxLayout()
@@ -431,12 +410,11 @@ class RGBApplianceGUI(QWidget):
         usb_layout.addStretch(1)
         self.usb_frame.setLayout(usb_layout)
 
-        # 반반 배치(Stretch)
         info_layout.addWidget(self.status_frame, stretch=1)
         info_layout.addWidget(self.usb_frame, stretch=1)
         self.info_panel.setLayout(info_layout)
 
-        # ===== 좌중단: Live RGB 테이블 (Point + RGB만) =====
+        # ===== 좌중단: 테이블 =====
         self.table = QTableWidget(len(POINTS), 4)
         self.table.setObjectName("RGBTable")
         self.table.setHorizontalHeaderLabels(["Point", "R", "G", "B"])
@@ -452,10 +430,10 @@ class RGBApplianceGUI(QWidget):
             self._set_table_item(row, 2, "-", align=Qt.AlignCenter)
             self._set_table_item(row, 3, "-", align=Qt.AlignCenter)
 
-        # ===== 우중단: 실험 저장값 그래프 =====
+        # ===== 우중단: 그래프 =====
         self.plot = RGBPlotWidget(title=f"실험 RGB 그래프 ({PLOT_POINT_ID})")
 
-        # ===== 좌하단/우하단: 버튼 =====
+        # ===== 버튼 =====
         self.btn_start = QPushButton("실험 시작")
         self.btn_start.setObjectName("StartBtn")
         self.btn_stop = QPushButton("실험 종료")
@@ -465,7 +443,7 @@ class RGBApplianceGUI(QWidget):
         self.btn_start.clicked.connect(self.start_experiment)
         self.btn_stop.clicked.connect(self.stop_experiment)
 
-        # ===== 2열×3행 레이아웃 =====
+        # ===== 레이아웃 =====
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(14)
@@ -500,6 +478,10 @@ class RGBApplianceGUI(QWidget):
         self.picam2.configure(config)
         self.picam2.start()
 
+        # ===== 최근 프레임 캐시 =====
+        self.latest_frame_bgr = None
+        self.last_preview_qpixmap = None
+
         # ===== Logging state =====
         self.running = False
         self.session_dir = None
@@ -514,9 +496,8 @@ class RGBApplianceGUI(QWidget):
         self.experiment_start_dt = None
         self.sample_count = 0
 
-        # ✅ 카운터(실험 중에만 증가)
-        self.image_count = 0      # 저장된 이미지 개수
-        self.data_log_count = 0   # 1분마다 RGB 로그 횟수(= 저장 사이클 횟수)
+        self.image_count = 0
+        self.data_log_count = 0
 
         self._last_disk_check = 0.0
         self._update_disk_label(force=True)
@@ -529,19 +510,24 @@ class RGBApplianceGUI(QWidget):
         self.btn_refresh_usb.clicked.connect(self.refresh_usb_ui)
         self.btn_copy_usb.clicked.connect(self.copy_selected_date_to_usb)
 
-        self.usb_timer = QTimer()
-        self.usb_timer.timeout.connect(self.refresh_usb_ui)
-        self.usb_timer.start(1000)  # 1초마다 감지/갱신
-        self.refresh_usb_ui()
-
-        # 초기 UI(배지/카운트)
+        # 초기 UI
         self._set_state_badge(False)
         self._update_counts_ui()
 
-        # ===== Main Timer =====
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.tick)
-        self.timer.start(40)
+        # ===== Timers =====
+        self.preview_timer = QTimer()
+        self.preview_timer.timeout.connect(self.update_preview_and_capture)
+        self.preview_timer.start(PREVIEW_INTERVAL_MS)
+
+        self.info_timer = QTimer()
+        self.info_timer.timeout.connect(self.update_info_and_table)
+        self.info_timer.start(INFO_INTERVAL_MS)
+
+        self.usb_timer = QTimer()
+        self.usb_timer.timeout.connect(self.refresh_usb_ui)
+        self.usb_timer.start(USB_INTERVAL_MS)
+
+        self.refresh_usb_ui()
 
     def _qss(self):
         return """
@@ -621,7 +607,6 @@ class RGBApplianceGUI(QWidget):
         #StopBtn { background: #3b82f6; color: white; }
         #StopBtn:hover { background: #2563eb; }
 
-        /* USB area */
         #UsbCombo {
             background: #111827;
             border: 1px solid #334155;
@@ -679,7 +664,7 @@ class RGBApplianceGUI(QWidget):
         except Exception:
             self.lab_disk.setText("남은 용량: 확인 실패")
 
-    # =================== USB UI/Logic ===================
+    # =================== USB ===================
 
     def refresh_usb_ui(self):
         mounts = find_usb_mounts()
@@ -775,7 +760,6 @@ class RGBApplianceGUI(QWidget):
         self.experiment_start_dt = datetime.now()
         self.sample_count = 0
 
-        # ✅ 카운터 초기화
         self.image_count = 0
         self.data_log_count = 0
         self._update_counts_ui()
@@ -813,18 +797,54 @@ class RGBApplianceGUI(QWidget):
 
         self.refresh_usb_ui()
 
-    def tick(self):
-        # ⚠️ 네 환경에서 이 조합이 색이 맞는 상태(유지)
-        frame_rgb = self.picam2.capture_array()
-        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    # =================== Core Update ===================
 
+    def update_preview_and_capture(self):
+        """
+        1) 카메라에서 최신 프레임 1장 획득
+        2) 프리뷰 갱신
+        3) 저장 타이밍이면 저장 수행
+        """
+        try:
+            frame = self.picam2.capture_array()
+        except Exception:
+            return
+
+        if frame is None:
+            return
+
+        # 현재 환경에서 색이 맞았던 기존 방식 유지
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        self.latest_frame_bgr = frame_bgr
+
+        # 프리뷰 갱신
+        overlay = draw_points(frame_bgr, POINTS)
+        disp = resize_for_preview(overlay, PREVIEW_MAX_W)
+        disp_rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+        h, w = disp_rgb.shape[:2]
+        qimg = QImage(disp_rgb.data, w, h, w * 3, QImage.Format_RGB888)
+        self.last_preview_qpixmap = QPixmap.fromImage(qimg)
+        self.preview_label.setPixmap(self.last_preview_qpixmap)
+
+        # 저장 로직
+        if self.running and self.csv_writer is not None:
+            self._handle_logging(frame_bgr)
+
+    def update_info_and_table(self):
+        """
+        테이블 / 경과시간 / 용량 표시처럼
+        꼭 고주파수일 필요 없는 UI만 분리 갱신
+        """
         self._update_disk_label()
 
         if self.running and self.experiment_start_dt is not None:
             elapsed = int((datetime.now() - self.experiment_start_dt).total_seconds())
             self.lab_elapsed.setText(f"실험 경과 시간: {fmt_hms(elapsed)}")
 
-        # Live RGB 테이블 갱신(현재 프레임 기준)
+        frame_bgr = self.latest_frame_bgr
+        if frame_bgr is None:
+            return
+
         for row, (pid, x, y) in enumerate(POINTS):
             rgb = safe_rgb(frame_bgr, x, y)
             if rgb is None:
@@ -837,77 +857,74 @@ class RGBApplianceGUI(QWidget):
                 self.table.item(row, 2).setText(str(g))
                 self.table.item(row, 3).setText(str(b))
 
-        # 프리뷰(좌상단)
-        overlay = draw_points(frame_bgr, POINTS)
-        disp = resize_for_preview(overlay, PREVIEW_MAX_W)
-        disp_rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-        h, w = disp_rgb.shape[:2]
-        qimg = QImage(disp_rgb.data, w, h, w * 3, QImage.Format_RGB888)
-        self.preview_label.setPixmap(QPixmap.fromImage(qimg))
+    def _handle_logging(self, frame_bgr):
+        now_t = time.time()
 
-        # ================= 저장 로직 분리 =================
-        if self.running and self.csv_writer is not None:
-            now_t = time.time()
+        # (1) 이미지 저장: 5분마다
+        img_path_str = ""
+        if SAVE_IMAGE and now_t >= self.next_img_log_time:
+            self.images_dir.mkdir(parents=True, exist_ok=True)
+            t_ms_img = now_ms()
+            img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
 
-            # (1) 이미지 저장: 5분마다
-            img_path_str = ""
-            if SAVE_IMAGE and now_t >= self.next_img_log_time:
-                self.images_dir.mkdir(parents=True, exist_ok=True)
-                t_ms_img = now_ms()
-                img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
-                if IMAGE_EXT.lower() in ["jpg", "jpeg"]:
-                    ok = cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
-                else:
-                    ok = cv2.imwrite(str(img_path), frame_bgr)
+            if IMAGE_EXT.lower() in ["jpg", "jpeg"]:
+                ok = cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
+            else:
+                ok = cv2.imwrite(str(img_path), frame_bgr)
 
-                if ok:
-                    img_path_str = str(img_path)
-                    self.image_count += 1
-                    self._update_counts_ui()
-                else:
-                    img_path_str = ""
-
-                self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
-
-            # (2) RGB 저장: 1분마다 (그래프 갱신도 여기서)
-            if now_t >= self.next_rgb_log_time:
-                t_iso = now_iso()
-                t_ms = now_ms()
-
-                # ✅ 데이터 수집 카운트: "1분마다 1회 로그 사이클" 기준
-                self.data_log_count += 1
+            if ok:
+                img_path_str = str(img_path)
+                self.image_count += 1
                 self._update_counts_ui()
+            else:
+                img_path_str = ""
 
-                plot_rgb = None
-                for pid, x, y in POINTS:
-                    rgb = safe_rgb(frame_bgr, x, y)
-                    if pid == PLOT_POINT_ID:
-                        plot_rgb = rgb
+            self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
 
-                    if rgb is None:
-                        self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, "", "", ""])
-                    else:
-                        r, g, b = rgb
-                        self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, r, g, b])
+        # (2) RGB 저장: 1분마다
+        if now_t >= self.next_rgb_log_time:
+            t_iso = now_iso()
+            t_ms = now_ms()
 
-                self.csv_file.flush()
+            self.data_log_count += 1
+            self._update_counts_ui()
 
-                if plot_rgb is not None:
-                    self.sample_count += 1
-                    self.plot.append(self.sample_count, plot_rgb)
+            plot_rgb = None
+            for pid, x, y in POINTS:
+                rgb = safe_rgb(frame_bgr, x, y)
+                if pid == PLOT_POINT_ID:
+                    plot_rgb = rgb
 
-                self.next_rgb_log_time = now_t + RGB_LOG_INTERVAL_SEC
-        # ===================================================
+                if rgb is None:
+                    self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, "", "", ""])
+                else:
+                    r, g, b = rgb
+                    self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, r, g, b])
+
+            self.csv_file.flush()
+
+            if plot_rgb is not None:
+                self.sample_count += 1
+                self.plot.append(self.sample_count, plot_rgb)
+
+            self.next_rgb_log_time = now_t + RGB_LOG_INTERVAL_SEC
 
     def closeEvent(self, event):
         try:
             self.running = False
+
             if self.csv_file:
                 self.csv_file.close()
+                self.csv_file = None
+                self.csv_writer = None
 
             if self.copy_worker is not None and self.copy_worker.isRunning():
                 self.usb_progress.setText("종료 중... (USB 복사 작업 정리)")
                 self.copy_worker.wait(1500)
+
+            self.preview_timer.stop()
+            self.info_timer.stop()
+            self.usb_timer.stop()
 
             self.picam2.stop()
         except Exception:
