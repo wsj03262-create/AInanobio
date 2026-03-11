@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
 
 # ================== 고정 설정 ==================
 WIDTH, HEIGHT = 1280, 720
-PREVIEW_MAX_W = 480   # 기존 640 -> 480로 축소하여 부하 감소
+PREVIEW_MAX_W = 480
 
 RGB_LOG_INTERVAL_SEC = 60.0
 IMAGE_LOG_INTERVAL_SEC = 300.0
@@ -44,10 +44,9 @@ PLOT_POINT_ID = "pc"
 PLOT_MAX_POINTS = 240
 DISK_UPDATE_SEC = 2.0
 
-# === 성능 최적화용 타이머 주기 ===
-PREVIEW_INTERVAL_MS = 100    # 10fps
-INFO_INTERVAL_MS = 500       # 상태/테이블/경과시간 갱신
-USB_INTERVAL_MS = 5000       # USB 탐색
+PREVIEW_INTERVAL_MS = 100
+INFO_INTERVAL_MS = 500
+USB_INTERVAL_MS = 5000
 # ===============================================
 
 
@@ -103,7 +102,7 @@ def fmt_bytes(n: int) -> str:
     return f"{gib:.2f} GB"
 
 
-# ===================== USB helpers =====================
+# ===================== USB / Session helpers =====================
 
 def find_usb_mounts():
     mounts = []
@@ -130,28 +129,38 @@ def find_usb_mounts():
     return mounts
 
 
-def list_session_dates(data_root: Path):
-    dates = set()
-    if not data_root.exists():
-        return []
-    for p in data_root.iterdir():
-        if not p.is_dir():
-            continue
-        name = p.name
-        if re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$", name):
-            dates.add(name[:10])
-    return sorted(dates, reverse=True)
+def is_session_dir_name(name: str) -> bool:
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$", name))
 
 
-def sessions_for_date(data_root: Path, yyyy_mm_dd: str):
+def list_sessions(data_root: Path):
+    """
+    DATA_ROOT 아래 세션 폴더를 최신순으로 반환
+    """
     out = []
     if not data_root.exists():
         return out
-    prefix = f"{yyyy_mm_dd}_"
+
     for p in data_root.iterdir():
-        if p.is_dir() and p.name.startswith(prefix):
+        if p.is_dir() and is_session_dir_name(p.name):
             out.append(p)
-    return sorted(out)
+
+    return sorted(out, key=lambda x: x.name, reverse=True)
+
+
+def recent_sessions(data_root: Path, limit=3):
+    return list_sessions(data_root)[:limit]
+
+
+def session_display_name(session_name: str):
+    """
+    2026-03-03_14-11-22 -> 2026-03-03 14:11:22
+    """
+    try:
+        dt = datetime.strptime(session_name, "%Y-%m-%d_%H-%M-%S")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return session_name
 
 
 class CopyWorker(QThread):
@@ -368,6 +377,7 @@ class RGBApplianceGUI(QWidget):
         status_layout.addStretch(1)
         self.status_frame.setLayout(status_layout)
 
+        # ===== USB 영역 =====
         self.usb_frame = QFrame()
         self.usb_frame.setObjectName("UsbFrame")
         usb_layout = QVBoxLayout()
@@ -384,8 +394,19 @@ class RGBApplianceGUI(QWidget):
         self.usb_status = QLabel("USB: 감지 중...")
         self.usb_status.setObjectName("InfoLine")
 
-        self.date_combo = QComboBox()
-        self.date_combo.setObjectName("UsbCombo")
+        # 최근 실험 내역
+        self.recent_title = QLabel("최근 실험 내역")
+        self.recent_title.setObjectName("SubTitle")
+
+        self.recent_labels = []
+        for _ in range(3):
+            lbl = QLabel("-")
+            lbl.setObjectName("RecentLine")
+            self.recent_labels.append(lbl)
+
+        # 세션 선택 콤보박스
+        self.session_combo = QComboBox()
+        self.session_combo.setObjectName("UsbCombo")
 
         self.btn_refresh_usb = QPushButton("새로고침")
         self.btn_refresh_usb.setObjectName("UsbBtn")
@@ -398,13 +419,16 @@ class RGBApplianceGUI(QWidget):
         self.usb_progress.setObjectName("InfoLine")
 
         usb_row = QHBoxLayout()
-        usb_row.addWidget(self.date_combo, stretch=1)
+        usb_row.addWidget(self.session_combo, stretch=1)
         usb_row.addWidget(self.btn_refresh_usb)
         usb_row.addWidget(self.btn_copy_usb)
 
         usb_layout.addWidget(usb_sep)
         usb_layout.addWidget(self.usb_title)
         usb_layout.addWidget(self.usb_status)
+        usb_layout.addWidget(self.recent_title)
+        for lbl in self.recent_labels:
+            usb_layout.addWidget(lbl)
         usb_layout.addLayout(usb_row)
         usb_layout.addWidget(self.usb_progress)
         usb_layout.addStretch(1)
@@ -508,11 +532,12 @@ class RGBApplianceGUI(QWidget):
         self.copy_worker = None
 
         self.btn_refresh_usb.clicked.connect(self.refresh_usb_ui)
-        self.btn_copy_usb.clicked.connect(self.copy_selected_date_to_usb)
+        self.btn_copy_usb.clicked.connect(self.copy_selected_session_to_usb)
 
         # 초기 UI
         self._set_state_badge(False)
         self._update_counts_ui()
+        self._update_button_states()
 
         # ===== Timers =====
         self.preview_timer = QTimer()
@@ -571,6 +596,17 @@ class RGBApplianceGUI(QWidget):
             font-weight: 900;
             color: #e2e8f0;
         }
+        #SubTitle{
+            font-size: 14px;
+            font-weight: 800;
+            color: #e2e8f0;
+            margin-top: 4px;
+        }
+        #RecentLine{
+            font-size: 13px;
+            color: #94a3b8;
+            padding-left: 2px;
+        }
 
         #RGBTable {
             background: #0b1220;
@@ -601,11 +637,35 @@ class RGBApplianceGUI(QWidget):
             font-size: 20px;
             font-weight: 900;
         }
-        QPushButton:disabled { background: #334155; color: #94a3b8; }
-        #StartBtn { background: #ef4444; color: white; }
-        #StartBtn:hover { background: #dc2626; }
-        #StopBtn { background: #3b82f6; color: white; }
-        #StopBtn:hover { background: #2563eb; }
+
+        QPushButton:disabled {
+            background: #334155;
+            color: #94a3b8;
+        }
+
+        #StartBtn {
+            background: #ef4444;
+            color: white;
+        }
+        #StartBtn:hover {
+            background: #dc2626;
+        }
+        #StartBtn:disabled {
+            background: #334155;
+            color: #94a3b8;
+        }
+
+        #StopBtn {
+            background: #3b82f6;
+            color: white;
+        }
+        #StopBtn:hover {
+            background: #2563eb;
+        }
+        #StopBtn:disabled {
+            background: #334155;
+            color: #94a3b8;
+        }
 
         #UsbCombo {
             background: #111827;
@@ -651,6 +711,14 @@ class RGBApplianceGUI(QWidget):
         self.lab_img_count.setText(f"이미지 수집: {self.image_count}")
         self.lab_data_count.setText(f"데이터 수집: {self.data_log_count}")
 
+    def _update_button_states(self):
+        if self.running:
+            self.btn_start.setEnabled(False)
+            self.btn_stop.setEnabled(True)
+        else:
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
+
     def _update_disk_label(self, force=False):
         now_t = time.time()
         if (not force) and (now_t - self._last_disk_check < DISK_UPDATE_SEC):
@@ -664,6 +732,15 @@ class RGBApplianceGUI(QWidget):
         except Exception:
             self.lab_disk.setText("남은 용량: 확인 실패")
 
+    def _update_recent_sessions_ui(self):
+        recents = recent_sessions(DATA_ROOT, limit=3)
+        for i in range(3):
+            if i < len(recents):
+                name = recents[i].name
+                self.recent_labels[i].setText(f"• {session_display_name(name)}")
+            else:
+                self.recent_labels[i].setText("• -")
+
     # =================== USB ===================
 
     def refresh_usb_ui(self):
@@ -676,53 +753,56 @@ class RGBApplianceGUI(QWidget):
         else:
             self.usb_status.setText("USB: 연결 안됨")
 
-        dates = list_session_dates(DATA_ROOT)
-        current = self.date_combo.currentText() if self.date_combo.count() else ""
+        self._update_recent_sessions_ui()
 
-        self.date_combo.blockSignals(True)
-        self.date_combo.clear()
-        for d in dates:
-            self.date_combo.addItem(d)
-        if current and current in dates:
-            self.date_combo.setCurrentText(current)
-        self.date_combo.blockSignals(False)
+        sessions = list_sessions(DATA_ROOT)
+        current = self.session_combo.currentText() if self.session_combo.count() else ""
 
-        can_copy = (self.usb_mount is not None) and (self.date_combo.count() > 0)
+        self.session_combo.blockSignals(True)
+        self.session_combo.clear()
+        for s in sessions:
+            self.session_combo.addItem(s.name)
+        if current and current in [s.name for s in sessions]:
+            self.session_combo.setCurrentText(current)
+        self.session_combo.blockSignals(False)
+
+        can_copy = (self.usb_mount is not None) and (self.session_combo.count() > 0)
         if self.copy_worker is not None and self.copy_worker.isRunning():
             can_copy = False
 
         self.btn_copy_usb.setEnabled(can_copy)
 
-        if self.date_combo.count() == 0:
-            self.usb_progress.setText("대기 중 (복사할 날짜 데이터 없음)")
+        if self.session_combo.count() == 0:
+            self.usb_progress.setText("대기 중 (복사할 세션 데이터 없음)")
         elif not self.usb_mount:
             self.usb_progress.setText("대기 중 (USB 연결 필요)")
         else:
-            d = self.date_combo.currentText()
-            n = len(sessions_for_date(DATA_ROOT, d)) if d else 0
-            self.usb_progress.setText(f"대기 중 (선택 날짜: {d}, 세션 {n}개)")
+            s = self.session_combo.currentText().strip()
+            self.usb_progress.setText(f"대기 중 (선택 세션: {session_display_name(s)})")
 
-    def copy_selected_date_to_usb(self):
+    def copy_selected_session_to_usb(self):
         if not self.usb_mount:
             self.usb_progress.setText("USB가 연결되지 않음")
             return
 
-        date = self.date_combo.currentText().strip()
-        if not date:
-            self.usb_progress.setText("복사할 날짜를 선택해줘")
+        session_name = self.session_combo.currentText().strip()
+        if not session_name:
+            self.usb_progress.setText("복사할 세션을 선택해줘")
             return
 
-        src_dirs = sessions_for_date(DATA_ROOT, date)
-        if not src_dirs:
-            self.usb_progress.setText(f"{date} 날짜에 복사할 세션 폴더가 없음")
+        src_dir = DATA_ROOT / session_name
+        if not src_dir.exists() or not src_dir.is_dir():
+            self.usb_progress.setText(f"선택한 세션 폴더가 없음: {session_name}")
             return
 
-        dst_root = Path(self.usb_mount) / "Ainanobio_export" / date
+        # 날짜별 폴더 아래에 세션 하나만 복사
+        date_str = session_name[:10]
+        dst_root = Path(self.usb_mount) / "Ainanobio_export" / date_str
 
         self.btn_copy_usb.setEnabled(False)
         self.usb_progress.setText("복사 준비 중...")
 
-        self.copy_worker = CopyWorker(src_dirs, dst_root)
+        self.copy_worker = CopyWorker([src_dir], dst_root)
         self.copy_worker.log.connect(self._on_copy_log)
         self.copy_worker.done.connect(self._on_copy_done)
         self.copy_worker.start()
@@ -768,11 +848,10 @@ class RGBApplianceGUI(QWidget):
         self.lab_start.setText(f"실험 시작 시간: {self.experiment_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
         self.lab_elapsed.setText("실험 경과 시간: 00:00:00")
 
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
         self.status_pill.setText(f"RECORDING  •  {sess}")
 
         self._set_state_badge(True)
+        self._update_button_states()
 
         self.plot.reset()
         self.refresh_usb_ui()
@@ -782,13 +861,12 @@ class RGBApplianceGUI(QWidget):
             return
 
         self.running = False
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
         self.status_pill.setText("READY  •  Camera ON")
 
         self.lab_state.setText("실험 상태: 대기")
         self._set_state_badge(False)
         self._update_disk_label(force=True)
+        self._update_button_states()
 
         if self.csv_file:
             self.csv_file.close()
@@ -800,11 +878,6 @@ class RGBApplianceGUI(QWidget):
     # =================== Core Update ===================
 
     def update_preview_and_capture(self):
-        """
-        1) 카메라에서 최신 프레임 1장 획득
-        2) 프리뷰 갱신
-        3) 저장 타이밍이면 저장 수행
-        """
         try:
             frame = self.picam2.capture_array()
         except Exception:
@@ -813,11 +886,9 @@ class RGBApplianceGUI(QWidget):
         if frame is None:
             return
 
-        # 현재 환경에서 색이 맞았던 기존 방식 유지
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         self.latest_frame_bgr = frame_bgr
 
-        # 프리뷰 갱신
         overlay = draw_points(frame_bgr, POINTS)
         disp = resize_for_preview(overlay, PREVIEW_MAX_W)
         disp_rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
@@ -826,15 +897,10 @@ class RGBApplianceGUI(QWidget):
         self.last_preview_qpixmap = QPixmap.fromImage(qimg)
         self.preview_label.setPixmap(self.last_preview_qpixmap)
 
-        # 저장 로직
         if self.running and self.csv_writer is not None:
             self._handle_logging(frame_bgr)
 
     def update_info_and_table(self):
-        """
-        테이블 / 경과시간 / 용량 표시처럼
-        꼭 고주파수일 필요 없는 UI만 분리 갱신
-        """
         self._update_disk_label()
 
         if self.running and self.experiment_start_dt is not None:
@@ -860,7 +926,6 @@ class RGBApplianceGUI(QWidget):
     def _handle_logging(self, frame_bgr):
         now_t = time.time()
 
-        # (1) 이미지 저장: 5분마다
         img_path_str = ""
         if SAVE_IMAGE and now_t >= self.next_img_log_time:
             self.images_dir.mkdir(parents=True, exist_ok=True)
@@ -881,7 +946,6 @@ class RGBApplianceGUI(QWidget):
 
             self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
 
-        # (2) RGB 저장: 1분마다
         if now_t >= self.next_rgb_log_time:
             t_iso = now_iso()
             t_ms = now_ms()
