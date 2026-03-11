@@ -4,6 +4,7 @@ import time
 import shutil
 import os
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from collections import deque
@@ -17,7 +18,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
-    QComboBox
+    QComboBox, QMessageBox
 )
 
 # ================== 고정 설정 ==================
@@ -134,9 +135,6 @@ def is_session_dir_name(name: str) -> bool:
 
 
 def list_sessions(data_root: Path):
-    """
-    DATA_ROOT 아래 세션 폴더를 최신순으로 반환
-    """
     out = []
     if not data_root.exists():
         return out
@@ -153,9 +151,6 @@ def recent_sessions(data_root: Path, limit=3):
 
 
 def session_display_name(session_name: str):
-    """
-    2026-03-03_14-11-22 -> 2026-03-03 14:11:22
-    """
     try:
         dt = datetime.strptime(session_name, "%Y-%m-%d_%H-%M-%S")
         return dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -394,7 +389,6 @@ class RGBApplianceGUI(QWidget):
         self.usb_status = QLabel("USB: 감지 중...")
         self.usb_status.setObjectName("InfoLine")
 
-        # 최근 실험 내역
         self.recent_title = QLabel("최근 실험 내역")
         self.recent_title.setObjectName("SubTitle")
 
@@ -404,7 +398,6 @@ class RGBApplianceGUI(QWidget):
             lbl.setObjectName("RecentLine")
             self.recent_labels.append(lbl)
 
-        # 세션 선택 콤보박스
         self.session_combo = QComboBox()
         self.session_combo.setObjectName("UsbCombo")
 
@@ -460,12 +453,17 @@ class RGBApplianceGUI(QWidget):
         # ===== 버튼 =====
         self.btn_start = QPushButton("실험 시작")
         self.btn_start.setObjectName("StartBtn")
+
         self.btn_stop = QPushButton("실험 종료")
         self.btn_stop.setObjectName("StopBtn")
         self.btn_stop.setEnabled(False)
 
+        self.btn_power = QPushButton("Power Off")
+        self.btn_power.setObjectName("PowerBtn")
+
         self.btn_start.clicked.connect(self.start_experiment)
         self.btn_stop.clicked.connect(self.stop_experiment)
+        self.btn_power.clicked.connect(self.confirm_power_off)
 
         # ===== 레이아웃 =====
         grid = QGridLayout()
@@ -479,8 +477,12 @@ class RGBApplianceGUI(QWidget):
         grid.addWidget(self.table,        1, 0)
         grid.addWidget(self.plot,         1, 1)
 
-        grid.addWidget(self.btn_start,    2, 0)
-        grid.addWidget(self.btn_stop,     2, 1)
+        button_row = QHBoxLayout()
+        button_row.setSpacing(12)
+        button_row.addWidget(self.btn_start)
+        button_row.addWidget(self.btn_stop)
+        button_row.addWidget(self.btn_power)
+        grid.addLayout(button_row, 2, 0, 1, 2)
 
         grid.setColumnStretch(0, 3)
         grid.setColumnStretch(1, 2)
@@ -667,6 +669,18 @@ class RGBApplianceGUI(QWidget):
             color: #94a3b8;
         }
 
+        #PowerBtn {
+            background: #f59e0b;
+            color: #0b1220;
+        }
+        #PowerBtn:hover {
+            background: #d97706;
+        }
+        #PowerBtn:disabled {
+            background: #334155;
+            color: #94a3b8;
+        }
+
         #UsbCombo {
             background: #111827;
             border: 1px solid #334155;
@@ -795,7 +809,6 @@ class RGBApplianceGUI(QWidget):
             self.usb_progress.setText(f"선택한 세션 폴더가 없음: {session_name}")
             return
 
-        # 날짜별 폴더 아래에 세션 하나만 복사
         date_str = session_name[:10]
         dst_root = Path(self.usb_mount) / "Ainanobio_export" / date_str
 
@@ -814,6 +827,73 @@ class RGBApplianceGUI(QWidget):
         self.usb_progress.setText(msg)
         self.copy_worker = None
         self.refresh_usb_ui()
+
+    # =================== Power Off ===================
+
+    def confirm_power_off(self):
+        if self.copy_worker is not None and self.copy_worker.isRunning():
+            QMessageBox.warning(
+                self,
+                "전원 종료 불가",
+                "USB 복사 작업이 진행 중입니다.\n복사가 끝난 뒤 전원을 종료해줘."
+            )
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("전원 종료")
+        msg.setText("라즈베리파이 전원을 종료합니다.")
+        msg.setInformativeText("진행 중인 작업이 있으면 저장 후 종료됩니다.")
+        msg.setIcon(QMessageBox.Warning)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+
+        yes_btn = msg.button(QMessageBox.Yes)
+        no_btn = msg.button(QMessageBox.No)
+        if yes_btn:
+            yes_btn.setText("예")
+        if no_btn:
+            no_btn.setText("아니요")
+
+        result = msg.exec_()
+        if result == QMessageBox.Yes:
+            self.power_off_system()
+
+    def power_off_system(self):
+        try:
+            self.status_pill.setText("POWER OFF  •  시스템 종료 중...")
+            self.usb_progress.setText("시스템 종료 준비 중...")
+            self.btn_start.setEnabled(False)
+            self.btn_stop.setEnabled(False)
+            self.btn_power.setEnabled(False)
+            self.btn_copy_usb.setEnabled(False)
+            self.btn_refresh_usb.setEnabled(False)
+            self.session_combo.setEnabled(False)
+
+            if self.running:
+                self.running = False
+
+            if self.csv_file:
+                self.csv_file.close()
+                self.csv_file = None
+                self.csv_writer = None
+
+            self.preview_timer.stop()
+            self.info_timer.stop()
+            self.usb_timer.stop()
+
+            try:
+                self.picam2.stop()
+            except Exception:
+                pass
+
+            QApplication.processEvents()
+
+            subprocess.Popen(["sudo", "shutdown", "-h", "now"])
+
+        except Exception as e:
+            self.usb_progress.setText(f"종료 실패: {e}")
+            self.btn_power.setEnabled(True)
+            self._update_button_states()
 
     # =================== Experiment ===================
 
