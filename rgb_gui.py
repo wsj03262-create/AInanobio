@@ -55,10 +55,6 @@ def session_stamp():
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
-def now_iso():
-    return datetime.now().isoformat(timespec="milliseconds")
-
-
 def now_ms():
     return int(time.time() * 1000)
 
@@ -887,7 +883,6 @@ class RGBApplianceGUI(QWidget):
                 pass
 
             QApplication.processEvents()
-
             subprocess.Popen(["sudo", "shutdown", "-h", "now"])
 
         except Exception as e:
@@ -909,7 +904,15 @@ class RGBApplianceGUI(QWidget):
         self.csv_path = self.session_dir / f"rgb_points_{sess}.csv"
         self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
         self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(["timestamp_iso", "unix_ms", "image_path", "point_id", "x", "y", "R", "G", "B"])
+        self.csv_writer.writerow([
+            "Timestamp",
+            "R1", "G1", "B1",
+            "R2", "G2", "B2",
+            "R3", "G3", "B3",
+            "R4", "G4", "B4",
+            "R5", "G5", "B5",
+            "AVG_R", "AVG_G", "AVG_B"
+        ])
 
         self.running = True
 
@@ -1006,7 +1009,7 @@ class RGBApplianceGUI(QWidget):
     def _handle_logging(self, frame_bgr):
         now_t = time.time()
 
-        img_path_str = ""
+        # (1) 이미지 저장: 5분마다
         if SAVE_IMAGE and now_t >= self.next_img_log_time:
             self.images_dir.mkdir(parents=True, exist_ok=True)
             t_ms_img = now_ms()
@@ -1018,34 +1021,51 @@ class RGBApplianceGUI(QWidget):
                 ok = cv2.imwrite(str(img_path), frame_bgr)
 
             if ok:
-                img_path_str = str(img_path)
                 self.image_count += 1
                 self._update_counts_ui()
-            else:
-                img_path_str = ""
 
             self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
 
+        # (2) RGB 저장: 1분마다, 한 줄로 저장
         if now_t >= self.next_rgb_log_time:
-            t_iso = now_iso()
-            t_ms = now_ms()
+            timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-            self.data_log_count += 1
-            self._update_counts_ui()
+            rgb_values = []
+            valid_rs = []
+            valid_gs = []
+            valid_bs = []
 
             plot_rgb = None
+
             for pid, x, y in POINTS:
                 rgb = safe_rgb(frame_bgr, x, y)
+
                 if pid == PLOT_POINT_ID:
                     plot_rgb = rgb
 
                 if rgb is None:
-                    self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, "", "", ""])
+                    r, g, b = "", "", ""
                 else:
                     r, g, b = rgb
-                    self.csv_writer.writerow([t_iso, t_ms, img_path_str, pid, x, y, r, g, b])
+                    valid_rs.append(r)
+                    valid_gs.append(g)
+                    valid_bs.append(b)
 
+                rgb_values.extend([r, g, b])
+
+            if valid_rs:
+                avg_r = round(sum(valid_rs) / len(valid_rs), 1)
+                avg_g = round(sum(valid_gs) / len(valid_gs), 1)
+                avg_b = round(sum(valid_bs) / len(valid_bs), 1)
+            else:
+                avg_r, avg_g, avg_b = "", "", ""
+
+            row = [timestamp_str] + rgb_values + [avg_r, avg_g, avg_b]
+            self.csv_writer.writerow(row)
             self.csv_file.flush()
+
+            self.data_log_count += 1
+            self._update_counts_ui()
 
             if plot_rgb is not None:
                 self.sample_count += 1
