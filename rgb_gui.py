@@ -33,15 +33,22 @@ IMAGE_EXT = "jpg"
 JPG_QUALITY = 95
 DATA_ROOT = Path("/home/pi/Ainanobio_data")
 
+# 3x3 포인트 (기존 pc 위치를 중앙 p5로 사용)
 POINTS = [
     ("p1", 530, 230),
-    ("p2", 770, 230),
-    ("p3", 530, 386),
-    ("p4", 770, 386),
-    ("pc", 650, 308),
+    ("p2", 650, 230),
+    ("p3", 770, 230),
+
+    ("p4", 530, 308),
+    ("p5", 650, 308),
+    ("p6", 770, 308),
+
+    ("p7", 530, 386),
+    ("p8", 650, 386),
+    ("p9", 770, 386),
 ]
 
-PLOT_POINT_ID = "pc"
+PLOT_POINT_ID = "p5"
 PLOT_MAX_POINTS = 240
 DISK_UPDATE_SEC = 2.0
 
@@ -911,6 +918,10 @@ class RGBApplianceGUI(QWidget):
             "R3", "G3", "B3",
             "R4", "G4", "B4",
             "R5", "G5", "B5",
+            "R6", "G6", "B6",
+            "R7", "G7", "B7",
+            "R8", "G8", "B8",
+            "R9", "G9", "B9",
             "AVG_R", "AVG_G", "AVG_B"
         ])
 
