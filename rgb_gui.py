@@ -33,7 +33,7 @@ IMAGE_EXT = "jpg"
 JPG_QUALITY = 95
 DATA_ROOT = Path("/home/pi/Ainanobio_data")
 
-# 3x3 포인트 (기존 pc 위치를 중앙 p5로 사용)
+# 3x3 포인트
 POINTS = [
     ("p1", 530, 230),
     ("p2", 650, 230),
@@ -161,6 +161,50 @@ def session_display_name(session_name: str):
         return session_name
 
 
+def get_device_from_mount(mount_point: str):
+    """
+    mount_point -> /dev/sda1 같은 파티션 장치명 반환
+    """
+    try:
+        result = subprocess.run(
+            ["findmnt", "-no", "SOURCE", "--target", mount_point],
+            capture_output=True, text=True, check=True
+        )
+        dev = result.stdout.strip()
+        return dev if dev else None
+    except Exception:
+        return None
+
+
+def get_parent_block_device(partition_dev: str):
+    """
+    /dev/sda1 -> /dev/sda
+    /dev/sdb1 -> /dev/sdb
+    """
+    try:
+        result = subprocess.run(
+            ["lsblk", "-no", "PKNAME", partition_dev],
+            capture_output=True, text=True, check=True
+        )
+        parent = result.stdout.strip()
+        if parent:
+            return f"/dev/{parent}"
+    except Exception:
+        pass
+    return None
+
+
+def sync_filesystem():
+    try:
+        subprocess.run(["sync"], check=False)
+    except Exception:
+        pass
+    try:
+        os.sync()
+    except Exception:
+        pass
+
+
 class CopyWorker(QThread):
     log = pyqtSignal(str)
     done = pyqtSignal(bool, str)
@@ -182,6 +226,9 @@ class CopyWorker(QThread):
                     shutil.rmtree(dst)
 
                 shutil.copytree(src, dst)
+
+            self.log.emit("복사 완료 후 동기화 중...")
+            sync_filesystem()
 
             self.done.emit(True, f"완료: {len(self.src_dirs)}개 세션 복사됨")
         except Exception as e:
@@ -411,6 +458,10 @@ class RGBApplianceGUI(QWidget):
         self.btn_copy_usb.setObjectName("UsbBtnPrimary")
         self.btn_copy_usb.setEnabled(False)
 
+        self.btn_eject_usb = QPushButton("USB 제거")
+        self.btn_eject_usb.setObjectName("UsbBtn")
+        self.btn_eject_usb.setEnabled(False)
+
         self.usb_progress = QLabel("대기 중")
         self.usb_progress.setObjectName("InfoLine")
 
@@ -418,6 +469,7 @@ class RGBApplianceGUI(QWidget):
         usb_row.addWidget(self.session_combo, stretch=1)
         usb_row.addWidget(self.btn_refresh_usb)
         usb_row.addWidget(self.btn_copy_usb)
+        usb_row.addWidget(self.btn_eject_usb)
 
         usb_layout.addWidget(usb_sep)
         usb_layout.addWidget(self.usb_title)
@@ -467,6 +519,10 @@ class RGBApplianceGUI(QWidget):
         self.btn_start.clicked.connect(self.start_experiment)
         self.btn_stop.clicked.connect(self.stop_experiment)
         self.btn_power.clicked.connect(self.confirm_power_off)
+
+        self.btn_refresh_usb.clicked.connect(self.refresh_usb_ui)
+        self.btn_copy_usb.clicked.connect(self.copy_selected_session_to_usb)
+        self.btn_eject_usb.clicked.connect(self.confirm_eject_usb)
 
         # ===== 레이아웃 =====
         grid = QGridLayout()
@@ -536,8 +592,8 @@ class RGBApplianceGUI(QWidget):
         self.usb_mount = None
         self.copy_worker = None
 
-        self.btn_refresh_usb.clicked.connect(self.refresh_usb_ui)
-        self.btn_copy_usb.clicked.connect(self.copy_selected_session_to_usb)
+        self.usb_removed_mode = False
+        self.last_usb_signature = tuple()
 
         # 초기 UI
         self._set_state_badge(False)
@@ -758,14 +814,32 @@ class RGBApplianceGUI(QWidget):
             else:
                 self.recent_labels[i].setText("• -")
 
+    def _update_usb_state_transition(self, mounts):
+        current_sig = tuple(mounts)
+
+        # 새 USB가 꽂혔거나, 이전과 다른 장치/마운트 상태가 되면 제거 모드 해제
+        if current_sig != self.last_usb_signature:
+            if len(current_sig) > 0:
+                self.usb_removed_mode = False
+
+        # USB가 완전히 사라진 경우도 상태 리셋
+        if len(current_sig) == 0:
+            self.usb_removed_mode = False
+
+        self.last_usb_signature = current_sig
+
     # =================== USB ===================
 
     def refresh_usb_ui(self):
         mounts = find_usb_mounts()
+        self._update_usb_state_transition(mounts)
+
         self.usb_mounts = mounts
         self.usb_mount = mounts[0] if mounts else None
 
-        if self.usb_mount:
+        if self.usb_removed_mode:
+            self.usb_status.setText("USB: 안전 제거 완료 (이제 뽑아도 됨)")
+        elif self.usb_mount:
             self.usb_status.setText(f"USB: 연결됨  •  {self.usb_mount}")
         else:
             self.usb_status.setText("USB: 연결 안됨")
@@ -783,13 +857,19 @@ class RGBApplianceGUI(QWidget):
             self.session_combo.setCurrentText(current)
         self.session_combo.blockSignals(False)
 
-        can_copy = (self.usb_mount is not None) and (self.session_combo.count() > 0)
+        can_copy = (self.usb_mount is not None) and (self.session_combo.count() > 0) and (not self.usb_removed_mode)
+        can_eject = (self.usb_mount is not None) and (not self.usb_removed_mode)
+
         if self.copy_worker is not None and self.copy_worker.isRunning():
             can_copy = False
+            can_eject = False
 
         self.btn_copy_usb.setEnabled(can_copy)
+        self.btn_eject_usb.setEnabled(can_eject)
 
-        if self.session_combo.count() == 0:
+        if self.usb_removed_mode:
+            self.usb_progress.setText("안전 제거 완료 (USB를 분리해도 됨)")
+        elif self.session_combo.count() == 0:
             self.usb_progress.setText("대기 중 (복사할 세션 데이터 없음)")
         elif not self.usb_mount:
             self.usb_progress.setText("대기 중 (USB 연결 필요)")
@@ -798,6 +878,10 @@ class RGBApplianceGUI(QWidget):
             self.usb_progress.setText(f"대기 중 (선택 세션: {session_display_name(s)})")
 
     def copy_selected_session_to_usb(self):
+        if self.usb_removed_mode:
+            self.usb_progress.setText("안전 제거된 USB임. 다시 꽂은 뒤 사용해줘.")
+            return
+
         if not self.usb_mount:
             self.usb_progress.setText("USB가 연결되지 않음")
             return
@@ -812,10 +896,10 @@ class RGBApplianceGUI(QWidget):
             self.usb_progress.setText(f"선택한 세션 폴더가 없음: {session_name}")
             return
 
-        date_str = session_name[:10]
-        dst_root = Path(self.usb_mount) / "Ainanobio_export" / date_str
+        dst_root = Path(self.usb_mount) / "Ainanobio_export"
 
         self.btn_copy_usb.setEnabled(False)
+        self.btn_eject_usb.setEnabled(False)
         self.usb_progress.setText("복사 준비 중...")
 
         self.copy_worker = CopyWorker([src_dir], dst_root)
@@ -830,6 +914,119 @@ class RGBApplianceGUI(QWidget):
         self.usb_progress.setText(msg)
         self.copy_worker = None
         self.refresh_usb_ui()
+
+    def confirm_eject_usb(self):
+        if self.copy_worker is not None and self.copy_worker.isRunning():
+            QMessageBox.warning(
+                self,
+                "USB 제거 불가",
+                "USB 복사 작업이 진행 중입니다.\n복사가 끝난 뒤 제거해줘."
+            )
+            return
+
+        if not self.usb_mount:
+            QMessageBox.information(self, "USB 제거", "현재 연결된 USB가 없어.")
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("USB 제거")
+        msg.setText("USB를 안전하게 제거합니다.")
+        msg.setInformativeText("제거 완료 메시지가 뜬 뒤 USB를 뽑아줘.")
+        msg.setIcon(QMessageBox.Warning)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+
+        yes_btn = msg.button(QMessageBox.Yes)
+        no_btn = msg.button(QMessageBox.No)
+        if yes_btn:
+            yes_btn.setText("예")
+        if no_btn:
+            no_btn.setText("아니요")
+
+        result = msg.exec_()
+        if result == QMessageBox.Yes:
+            self.eject_usb()
+
+    def eject_usb(self):
+        if not self.usb_mount:
+            self.usb_progress.setText("제거할 USB가 없음")
+            return
+
+        mount_to_eject = self.usb_mount
+        partition_dev = get_device_from_mount(mount_to_eject)
+        parent_dev = get_parent_block_device(partition_dev) if partition_dev else None
+
+        self.btn_copy_usb.setEnabled(False)
+        self.btn_eject_usb.setEnabled(False)
+        self.btn_refresh_usb.setEnabled(False)
+        self.session_combo.setEnabled(False)
+        self.usb_progress.setText("USB 안전 제거 중...")
+
+        try:
+            sync_filesystem()
+
+            # 1) 언마운트
+            umount_ok = False
+            umount_err = ""
+
+            try:
+                result = subprocess.run(
+                    ["udisksctl", "unmount", "-b", partition_dev],
+                    capture_output=True, text=True, check=False
+                )
+                if result.returncode == 0:
+                    umount_ok = True
+                else:
+                    umount_err = result.stderr.strip() or result.stdout.strip()
+            except Exception as e:
+                umount_err = str(e)
+
+            # udisksctl 실패 시 일반 umount 시도
+            if not umount_ok:
+                try:
+                    result = subprocess.run(
+                        ["umount", mount_to_eject],
+                        capture_output=True, text=True, check=False
+                    )
+                    if result.returncode == 0:
+                        umount_ok = True
+                    else:
+                        umount_err = result.stderr.strip() or result.stdout.strip()
+                except Exception as e:
+                    umount_err = str(e)
+
+            if not umount_ok:
+                raise RuntimeError(f"언마운트 실패: {umount_err or '원인 불명'}")
+
+            sync_filesystem()
+
+            # 2) 가능하면 장치 전원 차단
+            poweroff_msg = ""
+            if parent_dev:
+                try:
+                    result = subprocess.run(
+                        ["udisksctl", "power-off", "-b", parent_dev],
+                        capture_output=True, text=True, check=False
+                    )
+                    if result.returncode == 0:
+                        poweroff_msg = " / 전원 차단 완료"
+                    else:
+                        poweroff_msg = " / 전원 차단은 생략됨"
+                except Exception:
+                    poweroff_msg = " / 전원 차단은 생략됨"
+
+            self.usb_removed_mode = True
+            self.usb_mount = None
+            self.usb_mounts = []
+
+            self.usb_status.setText("USB: 안전 제거 완료 (이제 뽑아도 됨)")
+            self.usb_progress.setText(f"안전 제거 완료{poweroff_msg}")
+        except Exception as e:
+            self.usb_progress.setText(f"USB 제거 실패: {e}")
+        finally:
+            self.btn_refresh_usb.setEnabled(True)
+            self.session_combo.setEnabled(True)
+            self.refresh_usb_ui()
 
     # =================== Power Off ===================
 
@@ -869,6 +1066,7 @@ class RGBApplianceGUI(QWidget):
             self.btn_stop.setEnabled(False)
             self.btn_power.setEnabled(False)
             self.btn_copy_usb.setEnabled(False)
+            self.btn_eject_usb.setEnabled(False)
             self.btn_refresh_usb.setEnabled(False)
             self.session_combo.setEnabled(False)
 
@@ -879,6 +1077,8 @@ class RGBApplianceGUI(QWidget):
                 self.csv_file.close()
                 self.csv_file = None
                 self.csv_writer = None
+
+            sync_filesystem()
 
             self.preview_timer.stop()
             self.info_timer.stop()
@@ -963,10 +1163,12 @@ class RGBApplianceGUI(QWidget):
         self._update_button_states()
 
         if self.csv_file:
+            self.csv_file.flush()
             self.csv_file.close()
             self.csv_file = None
             self.csv_writer = None
 
+        sync_filesystem()
         self.refresh_usb_ui()
 
     # =================== Core Update ===================
@@ -1020,7 +1222,7 @@ class RGBApplianceGUI(QWidget):
     def _handle_logging(self, frame_bgr):
         now_t = time.time()
 
-        # (1) 이미지 저장: 5분마다
+        # (1) 이미지 저장
         if SAVE_IMAGE and now_t >= self.next_img_log_time:
             self.images_dir.mkdir(parents=True, exist_ok=True)
             t_ms_img = now_ms()
@@ -1037,7 +1239,7 @@ class RGBApplianceGUI(QWidget):
 
             self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
 
-        # (2) RGB 저장: 1분마다, 한 줄로 저장
+        # (2) RGB 저장
         if now_t >= self.next_rgb_log_time:
             timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -1089,6 +1291,7 @@ class RGBApplianceGUI(QWidget):
             self.running = False
 
             if self.csv_file:
+                self.csv_file.flush()
                 self.csv_file.close()
                 self.csv_file = None
                 self.csv_writer = None
@@ -1096,6 +1299,8 @@ class RGBApplianceGUI(QWidget):
             if self.copy_worker is not None and self.copy_worker.isRunning():
                 self.usb_progress.setText("종료 중... (USB 복사 작업 정리)")
                 self.copy_worker.wait(1500)
+
+            sync_filesystem()
 
             self.preview_timer.stop()
             self.info_timer.stop()
