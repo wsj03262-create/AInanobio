@@ -1397,8 +1397,8 @@ class RGBApplianceGUI(QWidget):
             event.accept()
 
 
-    if __name__ == "__main__":
-        app = QApplication(sys.argv)
-        w = RGBApplianceGUI()
-        w.showFullScreen()
-        sys.exit(app.exec_())
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    w = RGBApplianceGUI()
+    w.showFullScreen()
+    sys.exit(app.exec_())
