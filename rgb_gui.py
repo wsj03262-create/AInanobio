@@ -5,12 +5,14 @@ import shutil
 import os
 import re
 import subprocess
+import traceback
+import gc
 from datetime import datetime
 from pathlib import Path
 from collections import deque
 
 import cv2
-import numpy as np
+
 from picamera2 import Picamera2
 
 from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
@@ -34,7 +36,7 @@ IMAGE_EXT = "jpg"
 JPG_QUALITY = 95
 DATA_ROOT = Path("/home/pi/Ainanobio_data")
 
-# 기존 3x3 기준점 (이 점들의 바깥 끝으로 ROI 사각형 생성)
+# 3x3 포인트
 POINTS = [
     ("p1", 530, 230),
     ("p2", 650, 230),
@@ -49,18 +51,14 @@ POINTS = [
     ("p9", 770, 386),
 ]
 
-# ROI 내부 99개 샘플링 점 설정
-GRID_ROWS = 9
-GRID_COLS = 11
-SHOW_GRID_POINTS_ON_PREVIEW = True
-SHOW_POINT_LABELS = False
-
+PLOT_POINT_ID = "p5"
 PLOT_MAX_POINTS = 240
-DISK_UPDATE_SEC = 2.0
+DISK_UPDATE_SEC = 5.0
 
-PREVIEW_INTERVAL_MS = 100
-INFO_INTERVAL_MS = 500
-USB_INTERVAL_MS = 5000
+PREVIEW_INTERVAL_MS = 200
+INFO_INTERVAL_MS = 1000
+USB_INTERVAL_MS = 10000
+CSV_FLUSH_EVERY_N_ROWS = 5
 # ===============================================
 
 
@@ -80,46 +78,13 @@ def resize_for_preview(frame_bgr, max_w):
     return cv2.resize(frame_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
-def get_roi_from_points(points):
-    xs = [x for _, x, _ in points]
-    ys = [y for _, _, y in points]
-    left = min(xs)
-    right = max(xs)
-    top = min(ys)
-    bottom = max(ys)
-    return left, top, right, bottom
-
-
-def generate_grid_points_from_roi(left, top, right, bottom, rows, cols):
-    if rows < 1 or cols < 1:
-        return []
-
-    xs = np.linspace(left, right, cols)
-    ys = np.linspace(top, bottom, rows)
-
-    pts = []
-    idx = 1
-    for y in ys:
-        for x in xs:
-            pts.append((f"g{idx:02d}", int(round(x)), int(round(y))))
-            idx += 1
-    return pts
-
-
-def draw_roi_and_grid(frame_bgr, roi, grid_points=None):
+def draw_points(frame_bgr, points):
     out = frame_bgr.copy()
-    left, top, right, bottom = roi
-
-    cv2.rectangle(out, (left, top), (right, bottom), (0, 255, 0), 2)
-    cv2.putText(out, "ROI", (left, max(20, top - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
-
-    if grid_points:
-        for pid, x, y in grid_points:
-            cv2.circle(out, (x, y), 2, (0, 255, 255), -1)
-            if SHOW_POINT_LABELS:
-                cv2.putText(out, pid, (x + 4, y - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1, cv2.LINE_AA)
+    for pid, x, y in points:
+        cv2.circle(out, (x, y), 5, (0, 255, 0), -1)
+        cv2.circle(out, (x, y), 10, (0, 255, 0), 2)
+        cv2.putText(out, pid, (x + 8, y - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
     return out
 
 
@@ -129,53 +94,6 @@ def safe_rgb(frame_bgr, x, y):
         return None
     b, g, r = frame_bgr[y, x]
     return int(r), int(g), int(b)
-
-
-def get_roi_mean_rgb(frame_bgr, roi):
-    left, top, right, bottom = roi
-    h, w = frame_bgr.shape[:2]
-
-    left = max(0, min(left, w - 1))
-    right = max(0, min(right, w - 1))
-    top = max(0, min(top, h - 1))
-    bottom = max(0, min(bottom, h - 1))
-
-    if left > right or top > bottom:
-        return None
-
-    roi_img = frame_bgr[top:bottom + 1, left:right + 1]
-    if roi_img.size == 0:
-        return None
-
-    mean_b, mean_g, mean_r = roi_img.mean(axis=(0, 1))
-    return round(float(mean_r), 1), round(float(mean_g), 1), round(float(mean_b), 1)
-
-
-def sample_grid_rgb(frame_bgr, grid_points):
-    samples = []
-    valid_rs = []
-    valid_gs = []
-    valid_bs = []
-
-    for pid, x, y in grid_points:
-        rgb = safe_rgb(frame_bgr, x, y)
-        if rgb is None:
-            samples.append((pid, x, y, "", "", ""))
-        else:
-            r, g, b = rgb
-            samples.append((pid, x, y, r, g, b))
-            valid_rs.append(r)
-            valid_gs.append(g)
-            valid_bs.append(b)
-
-    if valid_rs:
-        avg_r = round(sum(valid_rs) / len(valid_rs), 1)
-        avg_g = round(sum(valid_gs) / len(valid_gs), 1)
-        avg_b = round(sum(valid_bs) / len(valid_bs), 1)
-    else:
-        avg_r, avg_g, avg_b = "", "", ""
-
-    return samples, (avg_r, avg_g, avg_b)
 
 
 def fmt_hms(seconds: int) -> str:
@@ -248,6 +166,9 @@ def session_display_name(session_name: str):
 
 
 def get_device_from_mount(mount_point: str):
+    """
+    mount_point -> /dev/sda1 같은 파티션 장치명 반환
+    """
     try:
         result = subprocess.run(
             ["findmnt", "-no", "SOURCE", "--target", mount_point],
@@ -260,6 +181,10 @@ def get_device_from_mount(mount_point: str):
 
 
 def get_parent_block_device(partition_dev: str):
+    """
+    /dev/sda1 -> /dev/sda
+    /dev/sdb1 -> /dev/sdb
+    """
     try:
         result = subprocess.run(
             ["lsblk", "-no", "PKNAME", partition_dev],
@@ -282,6 +207,7 @@ def sync_filesystem():
         os.sync()
     except Exception:
         pass
+
 
 
 class CopyWorker(QThread):
@@ -433,9 +359,7 @@ class RGBApplianceGUI(QWidget):
         self.setWindowTitle("AI NanoBio RGB Sensor")
         self.setStyleSheet(self._qss())
 
-        self.roi = get_roi_from_points(POINTS)
-        self.grid_points = generate_grid_points_from_roi(*self.roi, GRID_ROWS, GRID_COLS)
-
+        # ===== 상단 타이틀 / 상태 pill =====
         self.title_label = QLabel("AI NanoBio RGB Sensor")
         self.title_label.setObjectName("TitleLabel")
 
@@ -451,10 +375,12 @@ class RGBApplianceGUI(QWidget):
         separator.setFrameShape(QFrame.HLine)
         separator.setObjectName("Separator")
 
+        # ===== 좌상단: 프리뷰 =====
         self.preview_label = QLabel("Camera preview…")
         self.preview_label.setObjectName("Preview")
         self.preview_label.setAlignment(Qt.AlignCenter)
 
+        # ===== 우상단: 현재 상태 + USB 전송 패널 =====
         self.info_panel = QFrame()
         self.info_panel.setObjectName("InfoPanel")
         info_layout = QVBoxLayout()
@@ -487,15 +413,9 @@ class RGBApplianceGUI(QWidget):
         self.lab_disk = QLabel("남은 용량: -")
         self.lab_img_count = QLabel("이미지 수집: 0")
         self.lab_data_count = QLabel("데이터 수집: 0")
-        self.lab_roi_size = QLabel("ROI 영역: -")
-        self.lab_roi_avg = QLabel("ROI 평균 RGB: -")
-        self.lab_grid_avg = QLabel("99포인트 평균 RGB: -")
 
-        for w in [
-            self.lab_state, self.lab_start, self.lab_elapsed, self.lab_disk,
-            self.lab_img_count, self.lab_data_count, self.lab_roi_size,
-            self.lab_roi_avg, self.lab_grid_avg
-        ]:
+        for w in [self.lab_state, self.lab_start, self.lab_elapsed, self.lab_disk,
+                  self.lab_img_count, self.lab_data_count]:
             w.setObjectName("InfoLine")
 
         status_layout.addWidget(self.lab_state)
@@ -504,12 +424,10 @@ class RGBApplianceGUI(QWidget):
         status_layout.addWidget(self.lab_disk)
         status_layout.addWidget(self.lab_img_count)
         status_layout.addWidget(self.lab_data_count)
-        status_layout.addWidget(self.lab_roi_size)
-        status_layout.addWidget(self.lab_roi_avg)
-        status_layout.addWidget(self.lab_grid_avg)
         status_layout.addStretch(1)
         self.status_frame.setLayout(status_layout)
 
+        # ===== USB 영역 =====
         self.usb_frame = QFrame()
         self.usb_frame.setObjectName("UsbFrame")
         usb_layout = QVBoxLayout()
@@ -573,28 +491,26 @@ class RGBApplianceGUI(QWidget):
         info_layout.addWidget(self.usb_frame, stretch=1)
         self.info_panel.setLayout(info_layout)
 
-        # ROI/GRID 요약 테이블
-        self.table = QTableWidget(2, 4)
+        # ===== 좌중단: 테이블 =====
+        self.table = QTableWidget(len(POINTS), 4)
         self.table.setObjectName("RGBTable")
-        self.table.setHorizontalHeaderLabels(["Type", "R", "G", "B"])
+        self.table.setHorizontalHeaderLabels(["Point", "R", "G", "B"])
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionMode(QTableWidget.NoSelection)
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-        self._set_table_item(0, 0, "ROI 평균", align=Qt.AlignCenter)
-        self._set_table_item(0, 1, "-", align=Qt.AlignCenter)
-        self._set_table_item(0, 2, "-", align=Qt.AlignCenter)
-        self._set_table_item(0, 3, "-", align=Qt.AlignCenter)
+        for row, (pid, _, _) in enumerate(POINTS):
+            self._set_table_item(row, 0, pid, align=Qt.AlignCenter)
+            self._set_table_item(row, 1, "-", align=Qt.AlignCenter)
+            self._set_table_item(row, 2, "-", align=Qt.AlignCenter)
+            self._set_table_item(row, 3, "-", align=Qt.AlignCenter)
 
-        self._set_table_item(1, 0, f"{GRID_ROWS}x{GRID_COLS} 평균", align=Qt.AlignCenter)
-        self._set_table_item(1, 1, "-", align=Qt.AlignCenter)
-        self._set_table_item(1, 2, "-", align=Qt.AlignCenter)
-        self._set_table_item(1, 3, "-", align=Qt.AlignCenter)
+        # ===== 우중단: 그래프 =====
+        self.plot = RGBPlotWidget(title=f"실험 RGB 그래프 ({PLOT_POINT_ID})")
 
-        self.plot = RGBPlotWidget(title="ROI 평균 RGB 그래프")
-
+        # ===== 버튼 =====
         self.btn_start = QPushButton("실험 시작")
         self.btn_start.setObjectName("StartBtn")
 
@@ -613,6 +529,7 @@ class RGBApplianceGUI(QWidget):
         self.btn_copy_usb.clicked.connect(self.copy_selected_session_to_usb)
         self.btn_eject_usb.clicked.connect(self.confirm_eject_usb)
 
+        # ===== 레이아웃 =====
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(14)
@@ -643,6 +560,7 @@ class RGBApplianceGUI(QWidget):
         layout.addLayout(grid, stretch=1)
         self.setLayout(layout)
 
+        # ===== Camera =====
         self.picam2 = Picamera2()
         config = self.picam2.create_video_configuration(
             main={"size": (WIDTH, HEIGHT), "format": "BGR888"}
@@ -650,9 +568,11 @@ class RGBApplianceGUI(QWidget):
         self.picam2.configure(config)
         self.picam2.start()
 
+        # ===== 최근 프레임 캐시 =====
         self.latest_frame_bgr = None
         self.last_preview_qpixmap = None
 
+        # ===== Logging state =====
         self.running = False
         self.session_dir = None
         self.images_dir = None
@@ -671,7 +591,11 @@ class RGBApplianceGUI(QWidget):
 
         self._last_disk_check = 0.0
         self._update_disk_label(force=True)
+        self.preview_busy = False
+        self.shutting_down = False
+        self.pending_flush_count = 0
 
+        # ===== USB state =====
         self.usb_mounts = []
         self.usb_mount = None
         self.copy_worker = None
@@ -679,11 +603,12 @@ class RGBApplianceGUI(QWidget):
         self.usb_removed_mode = False
         self.last_usb_signature = tuple()
 
+        # 초기 UI
         self._set_state_badge(False)
         self._update_counts_ui()
         self._update_button_states()
-        self._update_roi_info_label()
 
+        # ===== Timers =====
         self.preview_timer = QTimer()
         self.preview_timer.timeout.connect(self.update_preview_and_capture)
         self.preview_timer.start(PREVIEW_INTERVAL_MS)
@@ -857,6 +782,24 @@ class RGBApplianceGUI(QWidget):
         item.setTextAlignment(align)
         self.table.setItem(row, col, item)
 
+
+    def _set_label_if_changed(self, label, text: str):
+        if label.text() != text:
+            label.setText(text)
+
+    def _set_table_text_if_changed(self, row: int, col: int, text: str):
+        item = self.table.item(row, col)
+        if item is not None and item.text() != text:
+            item.setText(text)
+
+    def _flush_csv_if_needed(self, force=False):
+        try:
+            if self.csv_file is not None and (force or self.pending_flush_count >= CSV_FLUSH_EVERY_N_ROWS):
+                self.csv_file.flush()
+                self.pending_flush_count = 0
+        except Exception:
+            pass
+
     def _set_state_badge(self, running: bool):
         if running:
             self.state_badge.setText('<span style="color:#ef4444;">●</span> 실험 중')
@@ -864,14 +807,8 @@ class RGBApplianceGUI(QWidget):
             self.state_badge.setText('<span style="color:#3b82f6;">●</span> 실험 대기')
 
     def _update_counts_ui(self):
-        self.lab_img_count.setText(f"이미지 수집: {self.image_count}")
-        self.lab_data_count.setText(f"데이터 수집: {self.data_log_count}")
-
-    def _update_roi_info_label(self):
-        left, top, right, bottom = self.roi
-        self.lab_roi_size.setText(
-            f"ROI 영역: ({left}, {top}) ~ ({right}, {bottom})  /  {right-left+1}x{bottom-top+1}px"
-        )
+        self._set_label_if_changed(self.lab_img_count, f"이미지 수집: {self.image_count}")
+        self._set_label_if_changed(self.lab_data_count, f"데이터 수집: {self.data_log_count}")
 
     def _update_button_states(self):
         if self.running:
@@ -905,11 +842,16 @@ class RGBApplianceGUI(QWidget):
 
     def _update_usb_state_transition(self, mounts):
         current_sig = tuple(mounts)
+
+        # 새 USB가 꽂혔거나, 이전과 다른 장치/마운트 상태가 되면 제거 모드 해제
         if current_sig != self.last_usb_signature:
             if len(current_sig) > 0:
                 self.usb_removed_mode = False
+
+        # USB가 완전히 사라진 경우도 상태 리셋
         if len(current_sig) == 0:
             self.usb_removed_mode = False
+
         self.last_usb_signature = current_sig
 
     # =================== USB ===================
@@ -1049,6 +991,7 @@ class RGBApplianceGUI(QWidget):
         try:
             sync_filesystem()
 
+            # 1) 언마운트
             umount_ok = False
             umount_err = ""
 
@@ -1064,6 +1007,7 @@ class RGBApplianceGUI(QWidget):
             except Exception as e:
                 umount_err = str(e)
 
+            # udisksctl 실패 시 일반 umount 시도
             if not umount_ok:
                 try:
                     result = subprocess.run(
@@ -1082,6 +1026,7 @@ class RGBApplianceGUI(QWidget):
 
             sync_filesystem()
 
+            # 2) 가능하면 장치 전원 차단
             poweroff_msg = ""
             if parent_dev:
                 try:
@@ -1139,100 +1084,82 @@ class RGBApplianceGUI(QWidget):
         if result == QMessageBox.Yes:
             self.power_off_system()
 
-    def power_off_system(self):
-        try:
-            self.status_pill.setText("POWER OFF  •  시스템 종료 중...")
-            self.usb_progress.setText("시스템 종료 준비 중...")
-            self.btn_start.setEnabled(False)
-            self.btn_stop.setEnabled(False)
-            self.btn_power.setEnabled(False)
-            self.btn_copy_usb.setEnabled(False)
-            self.btn_eject_usb.setEnabled(False)
-            self.btn_refresh_usb.setEnabled(False)
-            self.session_combo.setEnabled(False)
 
-            if self.running:
-                self.running = False
-
-            if self.csv_file:
-                self.csv_file.close()
-                self.csv_file = None
-                self.csv_writer = None
-
-            sync_filesystem()
-
-            self.preview_timer.stop()
-            self.info_timer.stop()
-            self.usb_timer.stop()
-
-            try:
-                self.picam2.stop()
-            except Exception:
-                pass
-
-            QApplication.processEvents()
-            subprocess.Popen(["sudo", "shutdown", "-h", "now"])
-
-        except Exception as e:
-            self.usb_progress.setText(f"종료 실패: {e}")
-            self.btn_power.setEnabled(True)
-            self._update_button_states()
-
-    # =================== Experiment ===================
-
-    def _build_csv_header(self):
-        header = [
-            "Timestamp",
-            "ROI_LEFT", "ROI_TOP", "ROI_RIGHT", "ROI_BOTTOM",
-            "ROI_AVG_R", "ROI_AVG_G", "ROI_AVG_B",
-            "GRID_AVG_R", "GRID_AVG_G", "GRID_AVG_B"
-        ]
-
-        for pid, x, y in self.grid_points:
-            header.extend([f"{pid}_X", f"{pid}_Y", f"{pid}_R", f"{pid}_G", f"{pid}_B"])
-
-        return header
-
-    def start_experiment(self):
-        if self.running:
-            return
-
-        sess = session_stamp()
-        self.session_dir = DATA_ROOT / sess
-        self.images_dir = self.session_dir / "images"
-        self.session_dir.mkdir(parents=True, exist_ok=True)
-
-        self.csv_path = self.session_dir / f"rgb_roi_grid99_{sess}.csv"
-        self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
-        self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(self._build_csv_header())
-
-        self.running = True
-
-        now_t = time.time()
-        self.next_rgb_log_time = now_t
-        self.next_img_log_time = now_t
-
-        self.experiment_start_dt = datetime.now()
-        self.sample_count = 0
-
-        self.image_count = 0
-        self.data_log_count = 0
-        self._update_counts_ui()
-
-        self.lab_state.setText("실험 상태: 실험중")
-        self.lab_start.setText(f"실험 시작 시간: {self.experiment_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-        self.lab_elapsed.setText("실험 경과 시간: 00:00:00")
-
-        self.status_pill.setText(f"RECORDING  •  {sess}")
-
-        self._set_state_badge(True)
+def power_off_system(self):
+    if self.shutting_down:
+        return
+    try:
+        self.status_pill.setText("POWER OFF  •  시스템 종료 준비 중...")
+        self.usb_progress.setText("시스템 종료 준비 중...")
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(False)
+        self.btn_power.setEnabled(False)
+        self.btn_copy_usb.setEnabled(False)
+        self.btn_eject_usb.setEnabled(False)
+        self.btn_refresh_usb.setEnabled(False)
+        self.session_combo.setEnabled(False)
+        self._begin_shutdown(mode="poweroff")
+    except Exception as e:
+        self.usb_progress.setText(f"종료 실패: {e}")
+        self.btn_power.setEnabled(True)
         self._update_button_states()
 
-        self.plot.reset()
-        self.refresh_usb_ui()
+# =================== Experiment ===================
 
-    def stop_experiment(self):
+
+
+def start_experiment(self):
+    if self.running or self.shutting_down:
+        return
+
+    sess = session_stamp()
+    self.session_dir = DATA_ROOT / sess
+    self.images_dir = self.session_dir / "images"
+    self.session_dir.mkdir(parents=True, exist_ok=True)
+
+    self.csv_path = self.session_dir / f"rgb_points_{sess}.csv"
+    self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
+    self.csv_writer = csv.writer(self.csv_file)
+    self.csv_writer.writerow([
+        "Timestamp",
+        "R1", "G1", "B1",
+        "R2", "G2", "B2",
+        "R3", "G3", "B3",
+        "R4", "G4", "B4",
+        "R5", "G5", "B5",
+        "R6", "G6", "B6",
+        "R7", "G7", "B7",
+        "R8", "G8", "B8",
+        "R9", "G9", "B9",
+        "AVG_R", "AVG_G", "AVG_B"
+    ])
+    self.pending_flush_count = 0
+
+    self.running = True
+
+    now_t = time.time()
+    self.next_rgb_log_time = now_t
+    self.next_img_log_time = now_t
+    self.experiment_start_dt = datetime.now()
+    self.sample_count = 0
+
+    self.image_count = 0
+    self.data_log_count = 0
+    self._update_counts_ui()
+
+    self.lab_state.setText("실험 상태: 실험중")
+    self.lab_start.setText(f"실험 시작 시간: {self.experiment_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+    self.lab_elapsed.setText("실험 경과 시간: 00:00:00")
+
+    self.status_pill.setText(f"RECORDING  •  {sess}")
+
+    self._set_state_badge(True)
+    self._update_button_states()
+
+    self.plot.reset()
+    self.refresh_usb_ui()
+
+def stop_experiment(self):
         if not self.running:
             return
 
@@ -1255,7 +1182,13 @@ class RGBApplianceGUI(QWidget):
 
     # =================== Core Update ===================
 
-    def update_preview_and_capture(self):
+
+def update_preview_and_capture(self):
+    if self.preview_busy or self.shutting_down:
+        return
+
+    self.preview_busy = True
+    try:
         try:
             frame = self.picam2.capture_array()
         except Exception:
@@ -1267,11 +1200,7 @@ class RGBApplianceGUI(QWidget):
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         self.latest_frame_bgr = frame_bgr
 
-        overlay = draw_roi_and_grid(
-            frame_bgr,
-            self.roi,
-            self.grid_points if SHOW_GRID_POINTS_ON_PREVIEW else None
-        )
+        overlay = draw_points(frame_bgr, POINTS)
         disp = resize_for_preview(overlay, PREVIEW_MAX_W)
         disp_rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
         h, w = disp_rgb.shape[:2]
@@ -1281,8 +1210,10 @@ class RGBApplianceGUI(QWidget):
 
         if self.running and self.csv_writer is not None:
             self._handle_logging(frame_bgr)
+    finally:
+        self.preview_busy = False
 
-    def update_info_and_table(self):
+def update_info_and_table(self):
         self._update_disk_label()
 
         if self.running and self.experiment_start_dt is not None:
@@ -1293,89 +1224,154 @@ class RGBApplianceGUI(QWidget):
         if frame_bgr is None:
             return
 
-        roi_avg = get_roi_mean_rgb(frame_bgr, self.roi)
-        grid_samples, grid_avg = sample_grid_rgb(frame_bgr, self.grid_points)
-
-        if roi_avg is None:
-            self.table.item(0, 1).setText("-")
-            self.table.item(0, 2).setText("-")
-            self.table.item(0, 3).setText("-")
-            self.lab_roi_avg.setText("ROI 평균 RGB: -")
-        else:
-            r, g, b = roi_avg
-            self.table.item(0, 1).setText(str(r))
-            self.table.item(0, 2).setText(str(g))
-            self.table.item(0, 3).setText(str(b))
-            self.lab_roi_avg.setText(f"ROI 평균 RGB: R={r}, G={g}, B={b}")
-
-        gr, gg, gb = grid_avg
-        if gr == "":
-            self.table.item(1, 1).setText("-")
-            self.table.item(1, 2).setText("-")
-            self.table.item(1, 3).setText("-")
-            self.lab_grid_avg.setText("99포인트 평균 RGB: -")
-        else:
-            self.table.item(1, 1).setText(str(gr))
-            self.table.item(1, 2).setText(str(gg))
-            self.table.item(1, 3).setText(str(gb))
-            self.lab_grid_avg.setText(f"99포인트 평균 RGB: R={gr}, G={gg}, B={gb}")
-
-    def _handle_logging(self, frame_bgr):
-        now_t = time.time()
-
-        if SAVE_IMAGE and now_t >= self.next_img_log_time:
-            self.images_dir.mkdir(parents=True, exist_ok=True)
-            t_ms_img = now_ms()
-            img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
-
-            if IMAGE_EXT.lower() in ["jpg", "jpeg"]:
-                ok = cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
+        for row, (pid, x, y) in enumerate(POINTS):
+            rgb = safe_rgb(frame_bgr, x, y)
+            if rgb is None:
+                self.table.item(row, 1).setText("-")
+                self.table.item(row, 2).setText("-")
+                self.table.item(row, 3).setText("-")
             else:
-                ok = cv2.imwrite(str(img_path), frame_bgr)
+                r, g, b = rgb
+                self.table.item(row, 1).setText(str(r))
+                self.table.item(row, 2).setText(str(g))
+                self.table.item(row, 3).setText(str(b))
 
-            if ok:
-                self.image_count += 1
-                self._update_counts_ui()
 
-            self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
+def _handle_logging(self, frame_bgr):
+    now_t = time.time()
 
-        if now_t >= self.next_rgb_log_time:
-            timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # (1) 이미지 저장
+    if SAVE_IMAGE and now_t >= self.next_img_log_time:
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        t_ms_img = now_ms()
+        img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
 
-            left, top, right, bottom = self.roi
-            roi_avg = get_roi_mean_rgb(frame_bgr, self.roi)
-            grid_samples, grid_avg = sample_grid_rgb(frame_bgr, self.grid_points)
+        if IMAGE_EXT.lower() in ["jpg", "jpeg"]:
+            ok = cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
+        else:
+            ok = cv2.imwrite(str(img_path), frame_bgr)
 
-            if roi_avg is None:
-                roi_r, roi_g, roi_b = "", "", ""
-            else:
-                roi_r, roi_g, roi_b = roi_avg
-
-            grid_r, grid_g, grid_b = grid_avg
-
-            row = [
-                timestamp_str,
-                left, top, right, bottom,
-                roi_r, roi_g, roi_b,
-                grid_r, grid_g, grid_b,
-            ]
-
-            for pid, x, y, r, g, b in grid_samples:
-                row.extend([x, y, r, g, b])
-
-            self.csv_writer.writerow(row)
-            self.csv_file.flush()
-
-            self.data_log_count += 1
+        if ok:
+            self.image_count += 1
             self._update_counts_ui()
 
-            if roi_avg is not None:
-                self.sample_count += 1
-                self.plot.append(self.sample_count, roi_avg)
+        self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
 
-            self.next_rgb_log_time = now_t + RGB_LOG_INTERVAL_SEC
+    # (2) RGB 저장
+    if now_t >= self.next_rgb_log_time:
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    def closeEvent(self, event):
+        rgb_values = []
+        valid_rs = []
+        valid_gs = []
+        valid_bs = []
+
+        plot_rgb = None
+
+        for pid, x, y in POINTS:
+            rgb = safe_rgb(frame_bgr, x, y)
+
+            if pid == PLOT_POINT_ID:
+                plot_rgb = rgb
+
+            if rgb is None:
+                r, g, b = "", "", ""
+            else:
+                r, g, b = rgb
+                valid_rs.append(r)
+                valid_gs.append(g)
+                valid_bs.append(b)
+
+            rgb_values.extend([r, g, b])
+
+        if valid_rs:
+            avg_r = round(sum(valid_rs) / len(valid_rs), 1)
+            avg_g = round(sum(valid_gs) / len(valid_gs), 1)
+            avg_b = round(sum(valid_bs) / len(valid_bs), 1)
+        else:
+            avg_r, avg_g, avg_b = "", "", ""
+
+        row = [timestamp_str] + rgb_values + [avg_r, avg_g, avg_b]
+        self.csv_writer.writerow(row)
+        self.pending_flush_count += 1
+
+        self.data_log_count += 1
+        self._update_counts_ui()
+
+        if plot_rgb is not None:
+            self.sample_count += 1
+            self.plot.append(self.sample_count, plot_rgb)
+
+        self._flush_csv_if_needed(force=False)
+        self.next_rgb_log_time = now_t + RGB_LOG_INTERVAL_SEC
+
+def _begin_shutdown(self, mode="close"):
+    if self.shutting_down:
+        return
+    self.shutting_down = True
+    self.running = False
+
+    self.status_pill.setText("종료 중...")
+    self.usb_progress.setText("리소스 정리 중...")
+    self.setEnabled(False)
+
+    try:
+        self.preview_timer.stop()
+    except Exception:
+        pass
+    try:
+        self.info_timer.stop()
+    except Exception:
+        pass
+    try:
+        self.usb_timer.stop()
+    except Exception:
+        pass
+
+    QTimer.singleShot(0, lambda: self._final_cleanup_and_exit(mode))
+
+def _final_cleanup_and_exit(self, mode="close"):
+    try:
+        self._flush_csv_if_needed(force=True)
+
+        if self.csv_file:
+            self.csv_file.close()
+            self.csv_file = None
+            self.csv_writer = None
+
+        if self.copy_worker is not None and self.copy_worker.isRunning():
+            self.usb_progress.setText("종료 중... (USB 복사 작업 정리)")
+            self.copy_worker.quit()
+            self.copy_worker.wait(500)
+
+        try:
+            self.picam2.stop()
+        except Exception:
+            pass
+
+        try:
+            gc.collect()
+        except Exception:
+            pass
+
+        if mode == "poweroff":
+            sync_filesystem()
+            QApplication.processEvents()
+            subprocess.Popen(["sudo", "shutdown", "-h", "now"])
+            return
+
+    except Exception as e:
+        try:
+            with open("/tmp/ainanobio_shutdown_error.log", "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().isoformat()}] {e}\\n")
+                f.write(traceback.format_exc() + "\\n")
+        except Exception:
+            pass
+    finally:
+        if mode != "poweroff":
+            QApplication.quit()
+
+def closeEvent(self, event):
         try:
             self.running = False
 
