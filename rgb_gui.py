@@ -1085,295 +1085,91 @@ class RGBApplianceGUI(QWidget):
             self.power_off_system()
 
 
-def power_off_system(self):
-    if self.shutting_down:
-        return
-    try:
-        self.status_pill.setText("POWER OFF  •  시스템 종료 준비 중...")
-        self.usb_progress.setText("시스템 종료 준비 중...")
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(False)
-        self.btn_power.setEnabled(False)
-        self.btn_copy_usb.setEnabled(False)
-        self.btn_eject_usb.setEnabled(False)
-        self.btn_refresh_usb.setEnabled(False)
-        self.session_combo.setEnabled(False)
-        self._begin_shutdown(mode="poweroff")
-    except Exception as e:
-        self.usb_progress.setText(f"종료 실패: {e}")
-        self.btn_power.setEnabled(True)
-        self._update_button_states()
-
-# =================== Experiment ===================
-
-
-
-def start_experiment(self):
-    if self.running or self.shutting_down:
-        return
-
-    sess = session_stamp()
-    self.session_dir = DATA_ROOT / sess
-    self.images_dir = self.session_dir / "images"
-    self.session_dir.mkdir(parents=True, exist_ok=True)
-
-    self.csv_path = self.session_dir / f"rgb_points_{sess}.csv"
-    self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
-    self.csv_writer = csv.writer(self.csv_file)
-    self.csv_writer.writerow([
-        "Timestamp",
-        "R1", "G1", "B1",
-        "R2", "G2", "B2",
-        "R3", "G3", "B3",
-        "R4", "G4", "B4",
-        "R5", "G5", "B5",
-        "R6", "G6", "B6",
-        "R7", "G7", "B7",
-        "R8", "G8", "B8",
-        "R9", "G9", "B9",
-        "AVG_R", "AVG_G", "AVG_B"
-    ])
-    self.pending_flush_count = 0
-
-    self.running = True
-
-    now_t = time.time()
-    self.next_rgb_log_time = now_t
-    self.next_img_log_time = now_t
-    self.experiment_start_dt = datetime.now()
-    self.sample_count = 0
-
-    self.image_count = 0
-    self.data_log_count = 0
-    self._update_counts_ui()
-
-    self.lab_state.setText("실험 상태: 실험중")
-    self.lab_start.setText(f"실험 시작 시간: {self.experiment_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-    self.lab_elapsed.setText("실험 경과 시간: 00:00:00")
-
-    self.status_pill.setText(f"RECORDING  •  {sess}")
-
-    self._set_state_badge(True)
-    self._update_button_states()
-
-    self.plot.reset()
-    self.refresh_usb_ui()
-
-def stop_experiment(self):
-        if not self.running:
+    def power_off_system(self):
+        if self.shutting_down:
             return
-
-        self.running = False
-        self.status_pill.setText("READY  •  Camera ON")
-
-        self.lab_state.setText("실험 상태: 대기")
-        self._set_state_badge(False)
-        self._update_disk_label(force=True)
-        self._update_button_states()
-
-        if self.csv_file:
-            self.csv_file.flush()
-            self.csv_file.close()
-            self.csv_file = None
-            self.csv_writer = None
-
-        sync_filesystem()
-        self.refresh_usb_ui()
-
-    # =================== Core Update ===================
-
-
-def update_preview_and_capture(self):
-    if self.preview_busy or self.shutting_down:
-        return
-
-    self.preview_busy = True
-    try:
         try:
-            frame = self.picam2.capture_array()
-        except Exception:
+            self.status_pill.setText("POWER OFF  •  시스템 종료 준비 중...")
+            self.usb_progress.setText("시스템 종료 준비 중...")
+            self.btn_start.setEnabled(False)
+            self.btn_stop.setEnabled(False)
+            self.btn_power.setEnabled(False)
+            self.btn_copy_usb.setEnabled(False)
+            self.btn_eject_usb.setEnabled(False)
+            self.btn_refresh_usb.setEnabled(False)
+            self.session_combo.setEnabled(False)
+            self._begin_shutdown(mode="poweroff")
+        except Exception as e:
+            self.usb_progress.setText(f"종료 실패: {e}")
+            self.btn_power.setEnabled(True)
+            self._update_button_states()
+
+    # =================== Experiment ===================
+
+
+
+    def start_experiment(self):
+        if self.running or self.shutting_down:
             return
 
-        if frame is None:
-            return
+        sess = session_stamp()
+        self.session_dir = DATA_ROOT / sess
+        self.images_dir = self.session_dir / "images"
+        self.session_dir.mkdir(parents=True, exist_ok=True)
 
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        self.latest_frame_bgr = frame_bgr
+        self.csv_path = self.session_dir / f"rgb_points_{sess}.csv"
+        self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow([
+            "Timestamp",
+            "R1", "G1", "B1",
+            "R2", "G2", "B2",
+            "R3", "G3", "B3",
+            "R4", "G4", "B4",
+            "R5", "G5", "B5",
+            "R6", "G6", "B6",
+            "R7", "G7", "B7",
+            "R8", "G8", "B8",
+            "R9", "G9", "B9",
+            "AVG_R", "AVG_G", "AVG_B"
+        ])
+        self.pending_flush_count = 0
 
-        overlay = draw_points(frame_bgr, POINTS)
-        disp = resize_for_preview(overlay, PREVIEW_MAX_W)
-        disp_rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-        h, w = disp_rgb.shape[:2]
-        qimg = QImage(disp_rgb.data, w, h, w * 3, QImage.Format_RGB888)
-        self.last_preview_qpixmap = QPixmap.fromImage(qimg)
-        self.preview_label.setPixmap(self.last_preview_qpixmap)
+        self.running = True
 
-        if self.running and self.csv_writer is not None:
-            self._handle_logging(frame_bgr)
-    finally:
-        self.preview_busy = False
+        now_t = time.time()
+        self.next_rgb_log_time = now_t
+        self.next_img_log_time = now_t
+        self.experiment_start_dt = datetime.now()
+        self.sample_count = 0
 
-def update_info_and_table(self):
-        self._update_disk_label()
-
-        if self.running and self.experiment_start_dt is not None:
-            elapsed = int((datetime.now() - self.experiment_start_dt).total_seconds())
-            self.lab_elapsed.setText(f"실험 경과 시간: {fmt_hms(elapsed)}")
-
-        frame_bgr = self.latest_frame_bgr
-        if frame_bgr is None:
-            return
-
-        for row, (pid, x, y) in enumerate(POINTS):
-            rgb = safe_rgb(frame_bgr, x, y)
-            if rgb is None:
-                self.table.item(row, 1).setText("-")
-                self.table.item(row, 2).setText("-")
-                self.table.item(row, 3).setText("-")
-            else:
-                r, g, b = rgb
-                self.table.item(row, 1).setText(str(r))
-                self.table.item(row, 2).setText(str(g))
-                self.table.item(row, 3).setText(str(b))
-
-
-def _handle_logging(self, frame_bgr):
-    now_t = time.time()
-
-    # (1) 이미지 저장
-    if SAVE_IMAGE and now_t >= self.next_img_log_time:
-        self.images_dir.mkdir(parents=True, exist_ok=True)
-        t_ms_img = now_ms()
-        img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
-
-        if IMAGE_EXT.lower() in ["jpg", "jpeg"]:
-            ok = cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
-        else:
-            ok = cv2.imwrite(str(img_path), frame_bgr)
-
-        if ok:
-            self.image_count += 1
-            self._update_counts_ui()
-
-        self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
-
-    # (2) RGB 저장
-    if now_t >= self.next_rgb_log_time:
-        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        rgb_values = []
-        valid_rs = []
-        valid_gs = []
-        valid_bs = []
-
-        plot_rgb = None
-
-        for pid, x, y in POINTS:
-            rgb = safe_rgb(frame_bgr, x, y)
-
-            if pid == PLOT_POINT_ID:
-                plot_rgb = rgb
-
-            if rgb is None:
-                r, g, b = "", "", ""
-            else:
-                r, g, b = rgb
-                valid_rs.append(r)
-                valid_gs.append(g)
-                valid_bs.append(b)
-
-            rgb_values.extend([r, g, b])
-
-        if valid_rs:
-            avg_r = round(sum(valid_rs) / len(valid_rs), 1)
-            avg_g = round(sum(valid_gs) / len(valid_gs), 1)
-            avg_b = round(sum(valid_bs) / len(valid_bs), 1)
-        else:
-            avg_r, avg_g, avg_b = "", "", ""
-
-        row = [timestamp_str] + rgb_values + [avg_r, avg_g, avg_b]
-        self.csv_writer.writerow(row)
-        self.pending_flush_count += 1
-
-        self.data_log_count += 1
+        self.image_count = 0
+        self.data_log_count = 0
         self._update_counts_ui()
 
-        if plot_rgb is not None:
-            self.sample_count += 1
-            self.plot.append(self.sample_count, plot_rgb)
+        self.lab_state.setText("실험 상태: 실험중")
+        self.lab_start.setText(f"실험 시작 시간: {self.experiment_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        self.lab_elapsed.setText("실험 경과 시간: 00:00:00")
 
-        self._flush_csv_if_needed(force=False)
-        self.next_rgb_log_time = now_t + RGB_LOG_INTERVAL_SEC
+        self.status_pill.setText(f"RECORDING  •  {sess}")
 
-def _begin_shutdown(self, mode="close"):
-    if self.shutting_down:
-        return
-    self.shutting_down = True
-    self.running = False
+        self._set_state_badge(True)
+        self._update_button_states()
 
-    self.status_pill.setText("종료 중...")
-    self.usb_progress.setText("리소스 정리 중...")
-    self.setEnabled(False)
+        self.plot.reset()
+        self.refresh_usb_ui()
 
-    try:
-        self.preview_timer.stop()
-    except Exception:
-        pass
-    try:
-        self.info_timer.stop()
-    except Exception:
-        pass
-    try:
-        self.usb_timer.stop()
-    except Exception:
-        pass
+    def stop_experiment(self):
+            if not self.running:
+                return
 
-    QTimer.singleShot(0, lambda: self._final_cleanup_and_exit(mode))
-
-def _final_cleanup_and_exit(self, mode="close"):
-    try:
-        self._flush_csv_if_needed(force=True)
-
-        if self.csv_file:
-            self.csv_file.close()
-            self.csv_file = None
-            self.csv_writer = None
-
-        if self.copy_worker is not None and self.copy_worker.isRunning():
-            self.usb_progress.setText("종료 중... (USB 복사 작업 정리)")
-            self.copy_worker.quit()
-            self.copy_worker.wait(500)
-
-        try:
-            self.picam2.stop()
-        except Exception:
-            pass
-
-        try:
-            gc.collect()
-        except Exception:
-            pass
-
-        if mode == "poweroff":
-            sync_filesystem()
-            QApplication.processEvents()
-            subprocess.Popen(["sudo", "shutdown", "-h", "now"])
-            return
-
-    except Exception as e:
-        try:
-            with open("/tmp/ainanobio_shutdown_error.log", "a", encoding="utf-8") as f:
-                f.write(f"[{datetime.now().isoformat()}] {e}\\n")
-                f.write(traceback.format_exc() + "\\n")
-        except Exception:
-            pass
-    finally:
-        if mode != "poweroff":
-            QApplication.quit()
-
-def closeEvent(self, event):
-        try:
             self.running = False
+            self.status_pill.setText("READY  •  Camera ON")
+
+            self.lab_state.setText("실험 상태: 대기")
+            self._set_state_badge(False)
+            self._update_disk_label(force=True)
+            self._update_button_states()
 
             if self.csv_file:
                 self.csv_file.flush()
@@ -1381,24 +1177,228 @@ def closeEvent(self, event):
                 self.csv_file = None
                 self.csv_writer = None
 
-            if self.copy_worker is not None and self.copy_worker.isRunning():
-                self.usb_progress.setText("종료 중... (USB 복사 작업 정리)")
-                self.copy_worker.wait(1500)
-
             sync_filesystem()
+            self.refresh_usb_ui()
 
+        # =================== Core Update ===================
+
+
+    def update_preview_and_capture(self):
+        if self.preview_busy or self.shutting_down:
+            return
+
+        self.preview_busy = True
+        try:
+            try:
+                frame = self.picam2.capture_array()
+            except Exception:
+                return
+
+            if frame is None:
+                return
+
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            self.latest_frame_bgr = frame_bgr
+
+            overlay = draw_points(frame_bgr, POINTS)
+            disp = resize_for_preview(overlay, PREVIEW_MAX_W)
+            disp_rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+            h, w = disp_rgb.shape[:2]
+            qimg = QImage(disp_rgb.data, w, h, w * 3, QImage.Format_RGB888)
+            self.last_preview_qpixmap = QPixmap.fromImage(qimg)
+            self.preview_label.setPixmap(self.last_preview_qpixmap)
+
+            if self.running and self.csv_writer is not None:
+                self._handle_logging(frame_bgr)
+        finally:
+            self.preview_busy = False
+
+    def update_info_and_table(self):
+            self._update_disk_label()
+
+            if self.running and self.experiment_start_dt is not None:
+                elapsed = int((datetime.now() - self.experiment_start_dt).total_seconds())
+                self.lab_elapsed.setText(f"실험 경과 시간: {fmt_hms(elapsed)}")
+
+            frame_bgr = self.latest_frame_bgr
+            if frame_bgr is None:
+                return
+
+            for row, (pid, x, y) in enumerate(POINTS):
+                rgb = safe_rgb(frame_bgr, x, y)
+                if rgb is None:
+                    self.table.item(row, 1).setText("-")
+                    self.table.item(row, 2).setText("-")
+                    self.table.item(row, 3).setText("-")
+                else:
+                    r, g, b = rgb
+                    self.table.item(row, 1).setText(str(r))
+                    self.table.item(row, 2).setText(str(g))
+                    self.table.item(row, 3).setText(str(b))
+
+
+    def _handle_logging(self, frame_bgr):
+        now_t = time.time()
+
+        # (1) 이미지 저장
+        if SAVE_IMAGE and now_t >= self.next_img_log_time:
+            self.images_dir.mkdir(parents=True, exist_ok=True)
+            t_ms_img = now_ms()
+            img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
+
+            if IMAGE_EXT.lower() in ["jpg", "jpeg"]:
+                ok = cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
+            else:
+                ok = cv2.imwrite(str(img_path), frame_bgr)
+
+            if ok:
+                self.image_count += 1
+                self._update_counts_ui()
+
+            self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
+
+        # (2) RGB 저장
+        if now_t >= self.next_rgb_log_time:
+            timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            rgb_values = []
+            valid_rs = []
+            valid_gs = []
+            valid_bs = []
+
+            plot_rgb = None
+
+            for pid, x, y in POINTS:
+                rgb = safe_rgb(frame_bgr, x, y)
+
+                if pid == PLOT_POINT_ID:
+                    plot_rgb = rgb
+
+                if rgb is None:
+                    r, g, b = "", "", ""
+                else:
+                    r, g, b = rgb
+                    valid_rs.append(r)
+                    valid_gs.append(g)
+                    valid_bs.append(b)
+
+                rgb_values.extend([r, g, b])
+
+            if valid_rs:
+                avg_r = round(sum(valid_rs) / len(valid_rs), 1)
+                avg_g = round(sum(valid_gs) / len(valid_gs), 1)
+                avg_b = round(sum(valid_bs) / len(valid_bs), 1)
+            else:
+                avg_r, avg_g, avg_b = "", "", ""
+
+            row = [timestamp_str] + rgb_values + [avg_r, avg_g, avg_b]
+            self.csv_writer.writerow(row)
+            self.pending_flush_count += 1
+
+            self.data_log_count += 1
+            self._update_counts_ui()
+
+            if plot_rgb is not None:
+                self.sample_count += 1
+                self.plot.append(self.sample_count, plot_rgb)
+
+            self._flush_csv_if_needed(force=False)
+            self.next_rgb_log_time = now_t + RGB_LOG_INTERVAL_SEC
+
+    def _begin_shutdown(self, mode="close"):
+        if self.shutting_down:
+            return
+        self.shutting_down = True
+        self.running = False
+
+        self.status_pill.setText("종료 중...")
+        self.usb_progress.setText("리소스 정리 중...")
+        self.setEnabled(False)
+
+        try:
             self.preview_timer.stop()
-            self.info_timer.stop()
-            self.usb_timer.stop()
-
-            self.picam2.stop()
         except Exception:
             pass
-        event.accept()
+        try:
+            self.info_timer.stop()
+        except Exception:
+            pass
+        try:
+            self.usb_timer.stop()
+        except Exception:
+            pass
+
+        QTimer.singleShot(0, lambda: self._final_cleanup_and_exit(mode))
+
+    def _final_cleanup_and_exit(self, mode="close"):
+        try:
+            self._flush_csv_if_needed(force=True)
+
+            if self.csv_file:
+                self.csv_file.close()
+                self.csv_file = None
+                self.csv_writer = None
+
+            if self.copy_worker is not None and self.copy_worker.isRunning():
+                self.usb_progress.setText("종료 중... (USB 복사 작업 정리)")
+                self.copy_worker.quit()
+                self.copy_worker.wait(500)
+
+            try:
+                self.picam2.stop()
+            except Exception:
+                pass
+
+            try:
+                gc.collect()
+            except Exception:
+                pass
+
+            if mode == "poweroff":
+                sync_filesystem()
+                QApplication.processEvents()
+                subprocess.Popen(["sudo", "shutdown", "-h", "now"])
+                return
+
+        except Exception as e:
+            try:
+                with open("/tmp/ainanobio_shutdown_error.log", "a", encoding="utf-8") as f:
+                    f.write(f"[{datetime.now().isoformat()}] {e}\\n")
+                    f.write(traceback.format_exc() + "\\n")
+            except Exception:
+                pass
+        finally:
+            if mode != "poweroff":
+                QApplication.quit()
+
+    def closeEvent(self, event):
+            try:
+                self.running = False
+
+                if self.csv_file:
+                    self.csv_file.flush()
+                    self.csv_file.close()
+                    self.csv_file = None
+                    self.csv_writer = None
+
+                if self.copy_worker is not None and self.copy_worker.isRunning():
+                    self.usb_progress.setText("종료 중... (USB 복사 작업 정리)")
+                    self.copy_worker.wait(1500)
+
+                sync_filesystem()
+
+                self.preview_timer.stop()
+                self.info_timer.stop()
+                self.usb_timer.stop()
+
+                self.picam2.stop()
+            except Exception:
+                pass
+            event.accept()
 
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    w = RGBApplianceGUI()
-    w.showFullScreen()
-    sys.exit(app.exec_())
+    if __name__ == "__main__":
+        app = QApplication(sys.argv)
+        w = RGBApplianceGUI()
+        w.showFullScreen()
+        sys.exit(app.exec_())
