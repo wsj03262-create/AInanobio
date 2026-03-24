@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
-    QComboBox, QMessageBox
+    QComboBox, QMessageBox, QInputDialog, QLineEdit
 )
 
 # ================== 고정 설정 ==================
@@ -62,6 +62,8 @@ PREVIEW_INTERVAL_MS = 150
 INFO_INTERVAL_MS = 1000
 USB_INTERVAL_MS = 8000
 # ===============================================
+
+ADMIN_CLOSE_PASSWORD = "2472"
 
 
 def session_stamp():
@@ -439,6 +441,7 @@ class RGBApplianceGUI(QWidget):
         self.is_closing = False
         self.cleanup_done = False
         self.capture_busy = False
+        self.allow_close = False
 
         self.title_label = QLabel("AI NanoBio RGB Sensor")
         self.title_label.setObjectName("TitleLabel")
@@ -447,9 +450,14 @@ class RGBApplianceGUI(QWidget):
         self.status_pill.setObjectName("StatusPill")
         self.status_pill.setAlignment(Qt.AlignCenter)
 
+        self.btn_admin_close = QPushButton("관리자 모드")
+        self.btn_admin_close.setObjectName("AdminBtn")
+        self.btn_admin_close.clicked.connect(self.request_admin_close)
+
         top_row = QHBoxLayout()
         top_row.addWidget(self.title_label, stretch=1)
         top_row.addWidget(self.status_pill)
+        top_row.addWidget(self.btn_admin_close)
 
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
@@ -840,6 +848,22 @@ class RGBApplianceGUI(QWidget):
             color: #94a3b8;
         }
 
+        #AdminBtn {
+            background: #6366f1;
+            color: white;
+            padding: 10px 14px;
+            font-size: 14px;
+            font-weight: 900;
+            border-radius: 10px;
+        }
+        #AdminBtn:hover {
+            background: #4f46e5;
+        }
+        #AdminBtn:disabled {
+            background: #334155;
+            color: #94a3b8;
+        }
+
         #UsbCombo {
             background: #111827;
             border: 1px solid #334155;
@@ -1133,6 +1157,33 @@ class RGBApplianceGUI(QWidget):
 
     # =================== Power Off ===================
 
+
+    def request_admin_close(self):
+        if self.copy_worker is not None and self.copy_worker.isRunning():
+            QMessageBox.warning(
+                self,
+                "종료 불가",
+                "USB 복사 작업이 진행 중입니다.\n복사가 끝난 뒤 종료해줘."
+            )
+            return
+
+        password, ok = QInputDialog.getText(
+            self,
+            "관리자 모드",
+            "비밀번호를 입력해줘.",
+            QLineEdit.Password
+        )
+
+        if not ok:
+            return
+
+        if password != ADMIN_CLOSE_PASSWORD:
+            QMessageBox.warning(self, "관리자 모드", "비밀번호가 틀렸어.")
+            return
+
+        self.allow_close = True
+        self.close()
+
     def confirm_power_off(self):
         if self.copy_worker is not None and self.copy_worker.isRunning():
             QMessageBox.warning(
@@ -1304,6 +1355,7 @@ class RGBApplianceGUI(QWidget):
             self.status_pill.setText(f"ERROR  •  {e}")
         finally:
             self.capture_busy = False
+        self.allow_close = False
             if not self.is_closing:
                 self.preview_timer.start(PREVIEW_INTERVAL_MS)
 
@@ -1463,6 +1515,10 @@ class RGBApplianceGUI(QWidget):
         self.cleanup_done = True
 
     def closeEvent(self, event):
+        if not self.allow_close:
+            event.ignore()
+            return
+
         try:
             self._cleanup_runtime()
         except Exception:
@@ -1473,5 +1529,6 @@ class RGBApplianceGUI(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     w = RGBApplianceGUI()
+    w.setWindowFlag(Qt.WindowCloseButtonHint, False)
     w.showFullScreen()
     sys.exit(app.exec_())
