@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
-    QComboBox, QMessageBox
+    QComboBox, QMessageBox, QInputDialog, QLineEdit
 )
 
 # ================== 고정 설정 ==================
@@ -34,7 +34,19 @@ IMAGE_EXT = "jpg"
 JPG_QUALITY = 95
 DATA_ROOT = Path("/home/pi/Ainanobio_data")
 
-# 기존 3x3 기준점 (이 점들의 바깥 끝으로 ROI 사각형 생성)
+# 안정화용
+PREVIEW_INTERVAL_MS = 150     # 기존 100 -> 150
+INFO_INTERVAL_MS = 1000       # 기존 500 -> 1000
+USB_INTERVAL_MS = 8000        # 기존 5000 -> 8000
+DISK_UPDATE_SEC = 3.0
+CSV_FLUSH_INTERVAL_SEC = 10.0
+SHOW_GRID_POINTS_ON_PREVIEW = True
+SHOW_POINT_LABELS = False
+PLOT_MAX_POINTS = 240
+
+DEV_PASSWORD = "2472"
+
+# 기존 3x3 기준점
 POINTS = [
     ("p1", 530, 230),
     ("p2", 650, 230),
@@ -49,19 +61,9 @@ POINTS = [
     ("p9", 770, 386),
 ]
 
-# ROI 내부 99개 샘플링 점 설정
+# ROI 내부 99개 샘플링 점
 GRID_ROWS = 9
 GRID_COLS = 11
-SHOW_GRID_POINTS_ON_PREVIEW = True
-SHOW_POINT_LABELS = False
-
-PLOT_MAX_POINTS = 240
-DISK_UPDATE_SEC = 5.0
-
-PREVIEW_INTERVAL_MS = 200
-INFO_INTERVAL_MS = 1000
-USB_INTERVAL_MS = 10000
-CSV_FLUSH_EVERY_N_ROWS = 5
 # ===============================================
 
 
@@ -78,7 +80,11 @@ def resize_for_preview(frame_bgr, max_w):
     if w <= max_w:
         return frame_bgr
     scale = max_w / w
-    return cv2.resize(frame_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    return cv2.resize(
+        frame_bgr,
+        (int(w * scale), int(h * scale)),
+        interpolation=cv2.INTER_AREA
+    )
 
 
 def get_roi_from_points(points):
@@ -112,15 +118,19 @@ def draw_roi_and_grid(frame_bgr, roi, grid_points=None):
     left, top, right, bottom = roi
 
     cv2.rectangle(out, (left, top), (right, bottom), (0, 255, 0), 2)
-    cv2.putText(out, "ROI", (left, max(20, top - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.putText(
+        out, "ROI", (left, max(20, top - 10)),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA
+    )
 
     if grid_points:
         for pid, x, y in grid_points:
             cv2.circle(out, (x, y), 2, (0, 255, 255), -1)
             if SHOW_POINT_LABELS:
-                cv2.putText(out, pid, (x + 4, y - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(
+                    out, pid, (x + 4, y - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1, cv2.LINE_AA
+                )
     return out
 
 
@@ -216,8 +226,7 @@ def find_usb_mounts():
     except Exception:
         pass
 
-    mounts = sorted(list(dict.fromkeys(mounts)))
-    return mounts
+    return sorted(list(dict.fromkeys(mounts)))
 
 
 def is_session_dir_name(name: str) -> bool:
@@ -276,10 +285,6 @@ def get_parent_block_device(partition_dev: str):
 
 def sync_filesystem():
     try:
-        subprocess.run(["sync"], check=False)
-    except Exception:
-        pass
-    try:
         os.sync()
     except Exception:
         pass
@@ -307,12 +312,36 @@ class CopyWorker(QThread):
 
                 shutil.copytree(src, dst)
 
-            self.log.emit("복사 완료 후 동기화 중...")
             sync_filesystem()
-
             self.done.emit(True, f"완료: {len(self.src_dirs)}개 세션 복사됨")
         except Exception as e:
             self.done.emit(False, f"실패: {e}")
+
+
+class ImageSaveWorker(QThread):
+    done = pyqtSignal(bool, str)
+
+    def __init__(self, frame_bgr, img_path, image_ext, jpg_quality):
+        super().__init__()
+        self.frame_bgr = frame_bgr.copy()
+        self.img_path = str(img_path)
+        self.image_ext = image_ext
+        self.jpg_quality = jpg_quality
+
+    def run(self):
+        try:
+            if self.image_ext.lower() in ["jpg", "jpeg"]:
+                ok = cv2.imwrite(
+                    self.img_path,
+                    self.frame_bgr,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), self.jpg_quality]
+                )
+            else:
+                ok = cv2.imwrite(self.img_path, self.frame_bgr)
+
+            self.done.emit(ok, self.img_path)
+        except Exception as e:
+            self.done.emit(False, str(e))
 
 
 class RGBPlotWidget(QFrame):
@@ -352,7 +381,6 @@ class RGBPlotWidget(QFrame):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-
         p.fillRect(self.rect(), self._bg)
 
         w = self.width()
@@ -381,7 +409,6 @@ class RGBPlotWidget(QFrame):
         p.setPen(self._text)
         f2 = QFont()
         f2.setPointSize(9)
-        f2.setBold(False)
         p.setFont(f2)
         y_ticks = [255, 192, 128, 64, 0]
         for i, val in enumerate(y_ticks):
@@ -398,7 +425,7 @@ class RGBPlotWidget(QFrame):
             return left + int(plot_w * i / (n - 1))
 
         def y_to_px(v):
-            v = max(0, min(255, v))
+            v = max(0, min(255, float(v)))
             return top + int(plot_h * (1.0 - (v / 255.0)))
 
         def draw_line(vals, pen):
@@ -415,7 +442,6 @@ class RGBPlotWidget(QFrame):
         draw_line(list(self.g), self._pen_g)
         draw_line(list(self.b), self._pen_b)
 
-        p.setFont(f2)
         legend_x = left + plot_w - 110
         legend_y = 18
         p.setPen(self._pen_r)
@@ -434,9 +460,71 @@ class RGBApplianceGUI(QWidget):
         self.setWindowTitle("AI NanoBio RGB Sensor")
         self.setStyleSheet(self._qss())
 
+        self.allow_close = False
+        self.is_shutting_down = False
+
         self.roi = get_roi_from_points(POINTS)
         self.grid_points = generate_grid_points_from_roi(*self.roi, GRID_ROWS, GRID_COLS)
 
+        self.latest_frame_bgr = None
+        self.last_preview_qpixmap = None
+
+        self.running = False
+        self.session_dir = None
+        self.images_dir = None
+        self.csv_path = None
+        self.csv_file = None
+        self.csv_writer = None
+
+        self.next_rgb_log_time = time.time()
+        self.next_img_log_time = time.time()
+        self.last_csv_flush_time = time.time()
+
+        self.experiment_start_dt = None
+        self.sample_count = 0
+        self.image_count = 0
+        self.data_log_count = 0
+
+        self.usb_mounts = []
+        self.usb_mount = None
+        self.copy_worker = None
+        self.image_save_worker = None
+
+        self.usb_removed_mode = False
+        self.last_usb_signature = tuple()
+        self._last_disk_check = 0.0
+        self.last_session_names = []
+
+        self._build_ui()
+
+        self.picam2 = Picamera2()
+        config = self.picam2.create_video_configuration(
+            main={"size": (WIDTH, HEIGHT), "format": "BGR888"}
+        )
+        self.picam2.configure(config)
+        self.picam2.start()
+
+        self._set_state_badge(False)
+        self._update_counts_ui()
+        self._update_button_states()
+        self._update_roi_info_label()
+        self._update_disk_label(force=True)
+
+        self.preview_timer = QTimer(self)
+        self.preview_timer.timeout.connect(self.update_preview_and_capture)
+        self.preview_timer.start(PREVIEW_INTERVAL_MS)
+
+        self.info_timer = QTimer(self)
+        self.info_timer.timeout.connect(self.update_info_and_table)
+        self.info_timer.start(INFO_INTERVAL_MS)
+
+        self.usb_timer = QTimer(self)
+        self.usb_timer.timeout.connect(self.refresh_usb_ui)
+        self.usb_timer.start(USB_INTERVAL_MS)
+
+        self.refresh_usb_ui()
+
+    def _build_ui(self):
         self.title_label = QLabel("AI NanoBio RGB Sensor")
         self.title_label.setObjectName("TitleLabel")
 
@@ -469,8 +557,6 @@ class RGBApplianceGUI(QWidget):
         status_layout.setSpacing(8)
 
         title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-
         self.info_title = QLabel("현재 상태")
         self.info_title.setObjectName("InfoTitle")
 
@@ -498,16 +584,8 @@ class RGBApplianceGUI(QWidget):
             self.lab_roi_avg, self.lab_grid_avg
         ]:
             w.setObjectName("InfoLine")
+            status_layout.addWidget(w)
 
-        status_layout.addWidget(self.lab_state)
-        status_layout.addWidget(self.lab_start)
-        status_layout.addWidget(self.lab_elapsed)
-        status_layout.addWidget(self.lab_disk)
-        status_layout.addWidget(self.lab_img_count)
-        status_layout.addWidget(self.lab_data_count)
-        status_layout.addWidget(self.lab_roi_size)
-        status_layout.addWidget(self.lab_roi_avg)
-        status_layout.addWidget(self.lab_grid_avg)
         status_layout.addStretch(1)
         self.status_frame.setLayout(status_layout)
 
@@ -574,7 +652,6 @@ class RGBApplianceGUI(QWidget):
         info_layout.addWidget(self.usb_frame, stretch=1)
         self.info_panel.setLayout(info_layout)
 
-        # ROI/GRID 요약 테이블
         self.table = QTableWidget(2, 4)
         self.table.setObjectName("RGBTable")
         self.table.setHorizontalHeaderLabels(["Type", "R", "G", "B"])
@@ -603,11 +680,15 @@ class RGBApplianceGUI(QWidget):
         self.btn_stop.setObjectName("StopBtn")
         self.btn_stop.setEnabled(False)
 
+        self.btn_dev = QPushButton("개발자 모드")
+        self.btn_dev.setObjectName("DevBtn")
+
         self.btn_power = QPushButton("Power Off")
         self.btn_power.setObjectName("PowerBtn")
 
         self.btn_start.clicked.connect(self.start_experiment)
         self.btn_stop.clicked.connect(self.stop_experiment)
+        self.btn_dev.clicked.connect(self.open_developer_mode)
         self.btn_power.clicked.connect(self.confirm_power_off)
 
         self.btn_refresh_usb.clicked.connect(self.refresh_usb_ui)
@@ -620,16 +701,18 @@ class RGBApplianceGUI(QWidget):
         grid.setVerticalSpacing(12)
 
         grid.addWidget(self.preview_label, 0, 0)
-        grid.addWidget(self.info_panel,   0, 1)
+        grid.addWidget(self.info_panel, 0, 1)
 
-        grid.addWidget(self.table,        1, 0)
-        grid.addWidget(self.plot,         1, 1)
+        grid.addWidget(self.table, 1, 0)
+        grid.addWidget(self.plot, 1, 1)
 
         button_row = QHBoxLayout()
         button_row.setSpacing(12)
         button_row.addWidget(self.btn_start)
         button_row.addWidget(self.btn_stop)
+        button_row.addWidget(self.btn_dev)
         button_row.addWidget(self.btn_power)
+
         grid.addLayout(button_row, 2, 0, 1, 2)
 
         grid.setColumnStretch(0, 3)
@@ -644,61 +727,6 @@ class RGBApplianceGUI(QWidget):
         layout.addLayout(grid, stretch=1)
         self.setLayout(layout)
 
-        self.picam2 = Picamera2()
-        config = self.picam2.create_video_configuration(
-            main={"size": (WIDTH, HEIGHT), "format": "BGR888"}
-        )
-        self.picam2.configure(config)
-        self.picam2.start()
-
-        self.latest_frame_bgr = None
-        self.last_preview_qpixmap = None
-
-        self.running = False
-        self.session_dir = None
-        self.images_dir = None
-        self.csv_path = None
-        self.csv_file = None
-        self.csv_writer = None
-
-        self.next_rgb_log_time = time.time()
-        self.next_img_log_time = time.time()
-
-        self.experiment_start_dt = None
-        self.sample_count = 0
-
-        self.image_count = 0
-        self.data_log_count = 0
-
-        self._last_disk_check = 0.0
-        self._update_disk_label(force=True)
-
-        self.usb_mounts = []
-        self.usb_mount = None
-        self.copy_worker = None
-
-        self.usb_removed_mode = False
-        self.last_usb_signature = tuple()
-
-        self._set_state_badge(False)
-        self._update_counts_ui()
-        self._update_button_states()
-        self._update_roi_info_label()
-
-        self.preview_timer = QTimer()
-        self.preview_timer.timeout.connect(self.update_preview_and_capture)
-        self.preview_timer.start(PREVIEW_INTERVAL_MS)
-
-        self.info_timer = QTimer()
-        self.info_timer.timeout.connect(self.update_info_and_table)
-        self.info_timer.start(INFO_INTERVAL_MS)
-
-        self.usb_timer = QTimer()
-        self.usb_timer.timeout.connect(self.refresh_usb_ui)
-        self.usb_timer.start(USB_INTERVAL_MS)
-
-        self.refresh_usb_ui()
-
     def _qss(self):
         return """
         QWidget { background: #0f172a; color: #e2e8f0; }
@@ -712,6 +740,7 @@ class RGBApplianceGUI(QWidget):
             font-size: 13px;
             color: #cbd5e1;
         }
+
         #Separator { color: #334155; border: 1px solid #334155; }
 
         #Preview {
@@ -722,32 +751,37 @@ class RGBApplianceGUI(QWidget):
             min-height: 260px;
         }
 
-        #InfoPanel{
+        #InfoPanel {
             background: #0b1220;
             border: 1px solid #334155;
             border-radius: 12px;
         }
-        #InfoTitle{
+
+        #InfoTitle {
             font-size: 16px;
             font-weight: 800;
             margin-bottom: 2px;
         }
-        #InfoLine{
+
+        #InfoLine {
             font-size: 14px;
             color: #cbd5e1;
         }
-        #StateBadge{
+
+        #StateBadge {
             font-size: 14px;
             font-weight: 900;
             color: #e2e8f0;
         }
-        #SubTitle{
+
+        #SubTitle {
             font-size: 14px;
             font-weight: 800;
             color: #e2e8f0;
             margin-top: 4px;
         }
-        #RecentLine{
+
+        #RecentLine {
             font-size: 13px;
             color: #94a3b8;
             padding-left: 2px;
@@ -760,6 +794,7 @@ class RGBApplianceGUI(QWidget):
             gridline-color: #334155;
             font-size: 14px;
         }
+
         QHeaderView::section {
             background: #111827;
             color: #e2e8f0;
@@ -767,6 +802,7 @@ class RGBApplianceGUI(QWidget):
             padding: 8px;
             font-weight: 700;
         }
+
         QTableWidget::item { padding: 10px; }
 
         #PlotPanel {
@@ -792,37 +828,25 @@ class RGBApplianceGUI(QWidget):
             background: #ef4444;
             color: white;
         }
-        #StartBtn:hover {
-            background: #dc2626;
-        }
-        #StartBtn:disabled {
-            background: #334155;
-            color: #94a3b8;
-        }
+        #StartBtn:hover { background: #dc2626; }
 
         #StopBtn {
             background: #3b82f6;
             color: white;
         }
-        #StopBtn:hover {
-            background: #2563eb;
+        #StopBtn:hover { background: #2563eb; }
+
+        #DevBtn {
+            background: #8b5cf6;
+            color: white;
         }
-        #StopBtn:disabled {
-            background: #334155;
-            color: #94a3b8;
-        }
+        #DevBtn:hover { background: #7c3aed; }
 
         #PowerBtn {
             background: #f59e0b;
             color: #0b1220;
         }
-        #PowerBtn:hover {
-            background: #d97706;
-        }
-        #PowerBtn:disabled {
-            background: #334155;
-            color: #94a3b8;
-        }
+        #PowerBtn:hover { background: #d97706; }
 
         #UsbCombo {
             background: #111827;
@@ -832,6 +856,7 @@ class RGBApplianceGUI(QWidget):
             color: #e2e8f0;
             font-size: 14px;
         }
+
         #UsbBtn {
             background: #334155;
             color: #e2e8f0;
@@ -875,19 +900,17 @@ class RGBApplianceGUI(QWidget):
         )
 
     def _update_button_states(self):
-        if self.running:
-            self.btn_start.setEnabled(False)
-            self.btn_stop.setEnabled(True)
-        else:
-            self.btn_start.setEnabled(True)
-            self.btn_stop.setEnabled(False)
+        self.btn_start.setEnabled(not self.running and not self.is_shutting_down)
+        self.btn_stop.setEnabled(self.running and not self.is_shutting_down)
+        self.btn_dev.setEnabled(not self.is_shutting_down)
+        self.btn_power.setEnabled(not self.is_shutting_down)
 
     def _update_disk_label(self, force=False):
         now_t = time.time()
         if (not force) and (now_t - self._last_disk_check < DISK_UPDATE_SEC):
             return
-        self._last_disk_check = now_t
 
+        self._last_disk_check = now_t
         try:
             DATA_ROOT.mkdir(parents=True, exist_ok=True)
             usage = shutil.disk_usage(str(DATA_ROOT.resolve()))
@@ -906,9 +929,8 @@ class RGBApplianceGUI(QWidget):
 
     def _update_usb_state_transition(self, mounts):
         current_sig = tuple(mounts)
-        if current_sig != self.last_usb_signature:
-            if len(current_sig) > 0:
-                self.usb_removed_mode = False
+        if current_sig != self.last_usb_signature and len(current_sig) > 0:
+            self.usb_removed_mode = False
         if len(current_sig) == 0:
             self.usb_removed_mode = False
         self.last_usb_signature = current_sig
@@ -932,15 +954,18 @@ class RGBApplianceGUI(QWidget):
         self._update_recent_sessions_ui()
 
         sessions = list_sessions(DATA_ROOT)
+        session_names = [s.name for s in sessions]
         current = self.session_combo.currentText() if self.session_combo.count() else ""
 
-        self.session_combo.blockSignals(True)
-        self.session_combo.clear()
-        for s in sessions:
-            self.session_combo.addItem(s.name)
-        if current and current in [s.name for s in sessions]:
-            self.session_combo.setCurrentText(current)
-        self.session_combo.blockSignals(False)
+        if session_names != self.last_session_names:
+            self.session_combo.blockSignals(True)
+            self.session_combo.clear()
+            for s in sessions:
+                self.session_combo.addItem(s.name)
+            if current and current in session_names:
+                self.session_combo.setCurrentText(current)
+            self.session_combo.blockSignals(False)
+            self.last_session_names = session_names
 
         can_copy = (self.usb_mount is not None) and (self.session_combo.count() > 0) and (not self.usb_removed_mode)
         can_eject = (self.usb_mount is not None) and (not self.usb_removed_mode)
@@ -949,8 +974,8 @@ class RGBApplianceGUI(QWidget):
             can_copy = False
             can_eject = False
 
-        self.btn_copy_usb.setEnabled(can_copy)
-        self.btn_eject_usb.setEnabled(can_eject)
+        self.btn_copy_usb.setEnabled(can_copy and not self.is_shutting_down)
+        self.btn_eject_usb.setEnabled(can_eject and not self.is_shutting_down)
 
         if self.usb_removed_mode:
             self.usb_progress.setText("안전 제거 완료 (USB를 분리해도 됨)")
@@ -1002,11 +1027,7 @@ class RGBApplianceGUI(QWidget):
 
     def confirm_eject_usb(self):
         if self.copy_worker is not None and self.copy_worker.isRunning():
-            QMessageBox.warning(
-                self,
-                "USB 제거 불가",
-                "USB 복사 작업이 진행 중입니다.\n복사가 끝난 뒤 제거해줘."
-            )
+            QMessageBox.warning(self, "USB 제거 불가", "USB 복사 작업이 진행 중입니다.")
             return
 
         if not self.usb_mount:
@@ -1028,8 +1049,7 @@ class RGBApplianceGUI(QWidget):
         if no_btn:
             no_btn.setText("아니요")
 
-        result = msg.exec_()
-        if result == QMessageBox.Yes:
+        if msg.exec_() == QMessageBox.Yes:
             self.eject_usb()
 
     def eject_usb(self):
@@ -1100,11 +1120,12 @@ class RGBApplianceGUI(QWidget):
             self.usb_removed_mode = True
             self.usb_mount = None
             self.usb_mounts = []
-
             self.usb_status.setText("USB: 안전 제거 완료 (이제 뽑아도 됨)")
             self.usb_progress.setText(f"안전 제거 완료{poweroff_msg}")
+
         except Exception as e:
             self.usb_progress.setText(f"USB 제거 실패: {e}")
+
         finally:
             self.btn_refresh_usb.setEnabled(True)
             self.session_combo.setEnabled(True)
@@ -1114,11 +1135,7 @@ class RGBApplianceGUI(QWidget):
 
     def confirm_power_off(self):
         if self.copy_worker is not None and self.copy_worker.isRunning():
-            QMessageBox.warning(
-                self,
-                "전원 종료 불가",
-                "USB 복사 작업이 진행 중입니다.\n복사가 끝난 뒤 전원을 종료해줘."
-            )
+            QMessageBox.warning(self, "전원 종료 불가", "USB 복사 작업이 진행 중입니다.")
             return
 
         msg = QMessageBox(self)
@@ -1136,48 +1153,146 @@ class RGBApplianceGUI(QWidget):
         if no_btn:
             no_btn.setText("아니요")
 
-        result = msg.exec_()
-        if result == QMessageBox.Yes:
+        if msg.exec_() == QMessageBox.Yes:
             self.power_off_system()
 
     def power_off_system(self):
         try:
+            self.is_shutting_down = True
             self.status_pill.setText("POWER OFF  •  시스템 종료 중...")
             self.usb_progress.setText("시스템 종료 준비 중...")
-            self.btn_start.setEnabled(False)
-            self.btn_stop.setEnabled(False)
-            self.btn_power.setEnabled(False)
+            self._update_button_states()
             self.btn_copy_usb.setEnabled(False)
             self.btn_eject_usb.setEnabled(False)
             self.btn_refresh_usb.setEnabled(False)
             self.session_combo.setEnabled(False)
 
+            self._stop_all_timers()
+
             if self.running:
                 self.running = False
 
-            if self.csv_file:
-                self.csv_file.close()
-                self.csv_file = None
-                self.csv_writer = None
+            self._finalize_logging()
 
-            sync_filesystem()
-
-            self.preview_timer.stop()
-            self.info_timer.stop()
-            self.usb_timer.stop()
+            if self.image_save_worker is not None and self.image_save_worker.isRunning():
+                self.image_save_worker.wait(2000)
 
             try:
                 self.picam2.stop()
             except Exception:
                 pass
 
+            sync_filesystem()
             QApplication.processEvents()
             subprocess.Popen(["sudo", "shutdown", "-h", "now"])
 
         except Exception as e:
             self.usb_progress.setText(f"종료 실패: {e}")
-            self.btn_power.setEnabled(True)
+            self.is_shutting_down = False
             self._update_button_states()
+
+    # =================== Developer Mode / Close ===================
+
+    def open_developer_mode(self):
+        if self.is_shutting_down:
+            return
+
+        pwd, ok = QInputDialog.getText(
+            self,
+            "개발자 모드",
+            "비밀번호를 입력하세요:",
+            QLineEdit.Password
+        )
+
+        if not ok:
+            return
+
+        if pwd != DEV_PASSWORD:
+            QMessageBox.warning(self, "개발자 모드", "비밀번호가 틀렸습니다.")
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("개발자 모드")
+        msg.setText("GUI를 종료합니다.")
+        msg.setInformativeText("저장 정리 후 프로그램을 닫습니다.")
+        msg.setIcon(QMessageBox.Warning)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+
+        yes_btn = msg.button(QMessageBox.Yes)
+        no_btn = msg.button(QMessageBox.No)
+        if yes_btn:
+            yes_btn.setText("종료")
+        if no_btn:
+            no_btn.setText("취소")
+
+        if msg.exec_() == QMessageBox.Yes:
+            self.developer_close()
+
+    def developer_close(self):
+        try:
+            self.is_shutting_down = True
+            self.status_pill.setText("DEVELOPER MODE  •  종료 중...")
+            self._update_button_states()
+            self.btn_copy_usb.setEnabled(False)
+            self.btn_eject_usb.setEnabled(False)
+            self.btn_refresh_usb.setEnabled(False)
+            self.session_combo.setEnabled(False)
+
+            self._stop_all_timers()
+
+            if self.running:
+                self.running = False
+
+            self._finalize_logging()
+
+            if self.copy_worker is not None and self.copy_worker.isRunning():
+                self.copy_worker.wait(2000)
+
+            if self.image_save_worker is not None and self.image_save_worker.isRunning():
+                self.image_save_worker.wait(2000)
+
+            try:
+                self.picam2.stop()
+            except Exception:
+                pass
+
+            sync_filesystem()
+
+            self.allow_close = True
+            self.close()
+
+        except Exception as e:
+            QMessageBox.warning(self, "종료 실패", str(e))
+            self.is_shutting_down = False
+            self.allow_close = False
+            self._update_button_states()
+
+    def _stop_all_timers(self):
+        try:
+            self.preview_timer.stop()
+        except Exception:
+            pass
+        try:
+            self.info_timer.stop()
+        except Exception:
+            pass
+        try:
+            self.usb_timer.stop()
+        except Exception:
+            pass
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_F4 and (event.modifiers() & Qt.AltModifier):
+            event.ignore()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if not self.allow_close:
+            event.ignore()
+            return
+        event.accept()
 
     # =================== Experiment ===================
 
@@ -1195,7 +1310,7 @@ class RGBApplianceGUI(QWidget):
         return header
 
     def start_experiment(self):
-        if self.running:
+        if self.running or self.is_shutting_down:
             return
 
         sess = session_stamp()
@@ -1213,10 +1328,10 @@ class RGBApplianceGUI(QWidget):
         now_t = time.time()
         self.next_rgb_log_time = now_t
         self.next_img_log_time = now_t
+        self.last_csv_flush_time = now_t
 
         self.experiment_start_dt = datetime.now()
         self.sample_count = 0
-
         self.image_count = 0
         self.data_log_count = 0
         self._update_counts_ui()
@@ -1224,12 +1339,10 @@ class RGBApplianceGUI(QWidget):
         self.lab_state.setText("실험 상태: 실험중")
         self.lab_start.setText(f"실험 시작 시간: {self.experiment_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
         self.lab_elapsed.setText("실험 경과 시간: 00:00:00")
-
         self.status_pill.setText(f"RECORDING  •  {sess}")
 
         self._set_state_badge(True)
         self._update_button_states()
-
         self.plot.reset()
         self.refresh_usb_ui()
 
@@ -1239,52 +1352,59 @@ class RGBApplianceGUI(QWidget):
 
         self.running = False
         self.status_pill.setText("READY  •  Camera ON")
-
         self.lab_state.setText("실험 상태: 대기")
         self._set_state_badge(False)
         self._update_disk_label(force=True)
         self._update_button_states()
-
-        if self.csv_file:
-            self.csv_file.flush()
-            self.csv_file.close()
-            self.csv_file = None
-            self.csv_writer = None
-
-        sync_filesystem()
+        self._finalize_logging()
         self.refresh_usb_ui()
+
+    def _finalize_logging(self):
+        try:
+            if self.csv_file:
+                self.csv_file.flush()
+                self.csv_file.close()
+                self.csv_file = None
+                self.csv_writer = None
+        except Exception:
+            pass
+
+        try:
+            sync_filesystem()
+        except Exception:
+            pass
 
     # =================== Core Update ===================
 
     def update_preview_and_capture(self):
-        if self.preview_busy or self.shutting_down:
+        if self.is_shutting_down:
             return
 
-        self.preview_busy = True
         try:
-            try:
-                frame = self.picam2.capture_array()
-            except Exception:
-                return
+            frame_bgr = self.picam2.capture_array()
+        except Exception:
+            return
 
-            if frame is None:
-                return
+        if frame_bgr is None:
+            return
 
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            self.latest_frame_bgr = frame_bgr
+        self.latest_frame_bgr = frame_bgr
 
-            overlay = draw_roi_and_grid(frame_bgr, self.roi, self.grid_points if SHOW_GRID_POINTS_ON_PREVIEW else None)
-            disp = resize_for_preview(overlay, PREVIEW_MAX_W)
-            disp_rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-            h, w = disp_rgb.shape[:2]
-            qimg = QImage(disp_rgb.data, w, h, w * 3, QImage.Format_RGB888)
-            self.last_preview_qpixmap = QPixmap.fromImage(qimg)
-            self.preview_label.setPixmap(self.last_preview_qpixmap)
+        overlay = draw_roi_and_grid(
+            frame_bgr,
+            self.roi,
+            self.grid_points if SHOW_GRID_POINTS_ON_PREVIEW else None
+        )
 
-            if self.running and self.csv_writer is not None:
-                self._handle_logging(frame_bgr)
-        finally:
-            self.preview_busy = False
+        disp = resize_for_preview(overlay, PREVIEW_MAX_W)
+        disp_rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+        h, w = disp_rgb.shape[:2]
+        qimg = QImage(disp_rgb.data, w, h, w * 3, QImage.Format_RGB888)
+        self.last_preview_qpixmap = QPixmap.fromImage(qimg)
+        self.preview_label.setPixmap(self.last_preview_qpixmap)
+
+        if self.running and self.csv_writer is not None:
+            self._handle_logging(frame_bgr)
 
     def update_info_and_table(self):
         self._update_disk_label()
@@ -1298,7 +1418,7 @@ class RGBApplianceGUI(QWidget):
             return
 
         roi_avg = get_roi_mean_rgb(frame_bgr, self.roi)
-        grid_samples, grid_avg = sample_grid_rgb(frame_bgr, self.grid_points)
+        _, grid_avg = sample_grid_rgb(frame_bgr, self.grid_points)
 
         if roi_avg is None:
             self.table.item(0, 1).setText("-")
@@ -1324,29 +1444,42 @@ class RGBApplianceGUI(QWidget):
             self.table.item(1, 3).setText(str(gb))
             self.lab_grid_avg.setText(f"99포인트 평균 RGB: R={gr}, G={gg}, B={gb}")
 
+    def _start_async_image_save(self, frame_bgr):
+        if self.image_save_worker is not None and self.image_save_worker.isRunning():
+            return False
+
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        t_ms_img = now_ms()
+        img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
+
+        self.image_save_worker = ImageSaveWorker(
+            frame_bgr=frame_bgr,
+            img_path=img_path,
+            image_ext=IMAGE_EXT,
+            jpg_quality=JPG_QUALITY
+        )
+        self.image_save_worker.done.connect(self._on_image_saved)
+        self.image_save_worker.start()
+        return True
+
+    def _on_image_saved(self, ok: bool, msg: str):
+        if ok:
+            self.image_count += 1
+            self._update_counts_ui()
+        self.image_save_worker = None
+
     def _handle_logging(self, frame_bgr):
         now_t = time.time()
 
         if SAVE_IMAGE and now_t >= self.next_img_log_time:
-            self.images_dir.mkdir(parents=True, exist_ok=True)
-            t_ms_img = now_ms()
-            img_path = self.images_dir / f"{t_ms_img}.{IMAGE_EXT}"
-
-            if IMAGE_EXT.lower() in ["jpg", "jpeg"]:
-                ok = cv2.imwrite(str(img_path), frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPG_QUALITY])
-            else:
-                ok = cv2.imwrite(str(img_path), frame_bgr)
-
-            if ok:
-                self.image_count += 1
-                self._update_counts_ui()
-
-            self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
+            started = self._start_async_image_save(frame_bgr)
+            if started:
+                self.next_img_log_time = now_t + IMAGE_LOG_INTERVAL_SEC
 
         if now_t >= self.next_rgb_log_time:
             timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-
             left, top, right, bottom = self.roi
+
             roi_avg = get_roi_mean_rgb(frame_bgr, self.roi)
             grid_samples, grid_avg = sample_grid_rgb(frame_bgr, self.grid_points)
 
@@ -1367,8 +1500,13 @@ class RGBApplianceGUI(QWidget):
             for pid, x, y, r, g, b in grid_samples:
                 row.extend([x, y, r, g, b])
 
-            self.csv_writer.writerow(row)
-            self.pending_flush_count += 1
+            try:
+                self.csv_writer.writerow(row)
+                if now_t - self.last_csv_flush_time >= CSV_FLUSH_INTERVAL_SEC:
+                    self.csv_file.flush()
+                    self.last_csv_flush_time = now_t
+            except Exception:
+                pass
 
             self.data_log_count += 1
             self._update_counts_ui()
@@ -1377,60 +1515,7 @@ class RGBApplianceGUI(QWidget):
                 self.sample_count += 1
                 self.plot.append(self.sample_count, roi_avg)
 
-            self._flush_csv_if_needed(force=False)
             self.next_rgb_log_time = now_t + RGB_LOG_INTERVAL_SEC
-
-    def _flush_csv_if_needed(self, force=False):
-        if not self.csv_file:
-            return
-        if force or self.pending_flush_count >= CSV_FLUSH_EVERY_N_ROWS:
-            self.csv_file.flush()
-            self.pending_flush_count = 0
-
-    def _begin_shutdown(self):
-        if self.shutting_down:
-            return
-        self.shutting_down = True
-        self.running = False
-        self.status_pill.setText("종료 중...")
-        self.setEnabled(False)
-        try:
-            self.preview_timer.stop()
-        except Exception:
-            pass
-        try:
-            self.info_timer.stop()
-        except Exception:
-            pass
-        try:
-            self.usb_timer.stop()
-        except Exception:
-            pass
-        QTimer.singleShot(0, self._final_cleanup_and_quit)
-
-    def _final_cleanup_and_quit(self):
-        try:
-            self._flush_csv_if_needed(force=True)
-            if self.csv_file:
-                self.csv_file.close()
-                self.csv_file = None
-                self.csv_writer = None
-            if self.copy_worker is not None and self.copy_worker.isRunning():
-                self.copy_worker.quit()
-                self.copy_worker.wait(500)
-            try:
-                self.picam2.stop()
-            except Exception:
-                pass
-            sync_filesystem()
-        except Exception:
-            pass
-        finally:
-            QApplication.quit()
-
-    def closeEvent(self, event):
-        event.ignore()
-        self._begin_shutdown()
 
 
 if __name__ == "__main__":
