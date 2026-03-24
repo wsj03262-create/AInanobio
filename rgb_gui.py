@@ -1355,7 +1355,6 @@ class RGBApplianceGUI(QWidget):
             self.status_pill.setText(f"ERROR  •  {e}")
         finally:
             self.capture_busy = False
-        self.allow_close = False
             if not self.is_closing:
                 self.preview_timer.start(PREVIEW_INTERVAL_MS)
 
