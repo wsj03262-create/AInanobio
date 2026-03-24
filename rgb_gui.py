@@ -1273,11 +1273,14 @@ class RGBApplianceGUI(QWidget):
 
         self.capture_busy = True
         try:
-            frame_bgr = self.picam2.capture_array()
-            if frame_bgr is None:
+            frame = self.picam2.capture_array()
+            if frame is None:
                 return
 
-            # main format이 이미 BGR888이므로 추가 색변환 금지
+            # 현재 HQ 카메라 환경에서는 원본 코드와 동일하게 한 번 채널 스왑해야 색이 맞음.
+            # format="BGR888" 설정이어도 capture_array() 결과가 실사용상 RGB처럼 들어오는 케이스가 있어
+            # 기존 동작을 유지한다.
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             self.latest_frame_bgr = frame_bgr.copy()
 
             overlay = draw_roi_and_grid(
