@@ -6,6 +6,8 @@ from pathlib import Path
 import cv2
 from picamera2 import Picamera2
 
+print("1")
+
 # ================== 사용자 설정 ==================
 # ✅ 해상도 낮추기 (추천: 1280x720부터)
 WIDTH, HEIGHT = 1280, 720
