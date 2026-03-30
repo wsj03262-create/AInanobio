@@ -113,6 +113,22 @@ def expand_roi(roi, expand_x, expand_y, max_w=None, max_h=None):
     return left, top, right, bottom
 
 
+def get_inner_roi_from_grid_points(grid_points, rows, cols, inset_cells=1):
+    if rows <= inset_cells * 2 or cols <= inset_cells * 2:
+        raise ValueError("inset_cells가 현재 GRID_ROWS/GRID_COLS보다 너무 큼")
+
+    if len(grid_points) != rows * cols:
+        raise ValueError("grid_points 개수와 rows*cols가 맞지 않음")
+
+    grid = [grid_points[r * cols:(r + 1) * cols] for r in range(rows)]
+    inner_points = []
+    for r in range(inset_cells, rows - inset_cells):
+        for c in range(inset_cells, cols - inset_cells):
+            inner_points.append(grid[r][c])
+
+    return get_roi_from_points(inner_points)
+
+
 def compute_avg_from_rgb_list(rgb_values):
     valid = [(r, g, b) for r, g, b in rgb_values if r != "" and g != "" and b != ""]
     if not valid:
@@ -648,7 +664,13 @@ class RGBApplianceGUI(QWidget):
         self.setStyleSheet(self._qss())
 
         self.base_roi = get_roi_from_points(POINTS)
-        self.roi = expand_roi(self.base_roi, ROI_EXPAND_X, ROI_EXPAND_Y, WIDTH, HEIGHT)
+        self.expanded_roi = expand_roi(self.base_roi, ROI_EXPAND_X, ROI_EXPAND_Y, WIDTH, HEIGHT)
+        initial_grid_points = generate_grid_points_from_roi(*self.expanded_roi, GRID_ROWS, GRID_COLS)
+
+        # 현재 ROI에서 바깥 한 줄(1행/1열) 점을 제외한 안쪽 점들 기준으로 ROI를 다시 잡음
+        self.roi = get_inner_roi_from_grid_points(initial_grid_points, GRID_ROWS, GRID_COLS, inset_cells=1)
+
+        # 새 ROI 안에 99포인트를 다시 균등 배치
         self.grid_points = generate_grid_points_from_roi(*self.roi, GRID_ROWS, GRID_COLS)
 
         self.is_closing = False
